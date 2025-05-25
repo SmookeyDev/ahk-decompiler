@@ -447,12 +447,29 @@ class DumpGUI:
         if filepath:
             self.exe = filepath
             self.file_path_var.set(filepath)
-            self.run_button.config(state='normal')
+            self._reset_ui_state()  # Use centralized method to ensure consistent state
             self.log_widget.log(f"Selected file: {os.path.basename(filepath)}", 'info')
     
     def clear_log(self):
         """Clear the log widget."""
         self.log_widget.clear()
+    
+    def _reset_ui_state(self):
+        """
+        Reset UI state to ready state - centralized button control.
+        
+        This method ensures that:
+        - Start button is enabled only if a file is selected
+        - Stop button is always disabled (ready state)
+        - Open folder button remains in its current state (controlled by extraction results)
+        - Called when process finishes, is stopped, or file is selected
+        """
+        try:
+            self.run_button.config(state='normal' if self.exe else 'disabled')
+            self.stop_button.config(state='disabled')
+            # Note: open_folder_button state is managed separately based on extraction results
+        except Exception:
+            pass  # Ignore any GUI errors during cleanup
     
     def open_output_folder(self):
         """Open the output folder."""
@@ -471,6 +488,9 @@ class DumpGUI:
             self._terminate_all_monitored_processes()
         except Exception as e:
             self.log_widget.log(f"Error during process termination: {str(e)}", 'warning')
+        
+        # Reset UI state immediately when user stops
+        self._reset_ui_state()
     
     def update_process_list(self):
         """Update the process list display - thread safe version."""
@@ -607,9 +627,8 @@ class DumpGUI:
             except Exception as e:
                 self.log_widget.log(f"Error during final cleanup: {str(e)}", 'warning')
             
-            # Reset UI state
-            self.root.after(0, lambda: self.run_button.config(state='normal'))
-            self.root.after(0, lambda: self.stop_button.config(state='disabled'))
+            # Reset UI state - ensure buttons are properly reset regardless of how process ended
+            self.root.after(0, self._reset_ui_state)
     
     def _handle_main_process_unpack(self, main_pid):
         """Handle main process unpacking with progress updates."""
