@@ -9,6 +9,7 @@ import webbrowser
 import subprocess
 import time
 import os
+import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 
@@ -21,6 +22,7 @@ from core.monitor import (
 )
 from core.extractor import process_single_pid
 from core.memory import wait_for_unpack
+from core.resources import extract_scripts_from_resources
 
 
 class ModernProgressBar:
@@ -195,6 +197,7 @@ class DumpGUI:
         self._setup_window()
         self._setup_styles()
         self._setup_gui()
+        self._setup_logging()
         
     def _setup_window(self):
         """Configure the main window."""
@@ -321,6 +324,13 @@ class DumpGUI:
             variable=self.monitor_children
         ).pack(anchor='w')
         
+        self.extract_resources = tk.BooleanVar(value=True)
+        ttk.Checkbutton(
+            options_frame,
+            text="Extract from RCDATA resources (for some packed executables)",
+            variable=self.extract_resources
+        ).pack(anchor='w')
+        
         self.auto_open = tk.BooleanVar(value=True)
         ttk.Checkbutton(
             options_frame,
@@ -388,6 +398,42 @@ class DumpGUI:
         )
         self.open_folder_button.pack(side='left')
     
+    def _setup_logging(self):
+        """Setup logging to redirect to GUI log widget."""
+        class GUILogHandler(logging.Handler):
+            def __init__(self, log_widget, root):
+                super().__init__()
+                self.log_widget = log_widget
+                self.root = root
+            
+            def emit(self, record):
+                try:
+                    msg = self.format(record)
+                    level_map = {
+                        'DEBUG': 'info',
+                        'INFO': 'info', 
+                        'WARNING': 'warning',
+                        'ERROR': 'error',
+                        'CRITICAL': 'error'
+                    }
+                    gui_level = level_map.get(record.levelname, 'info')
+                    # Use root.after to ensure thread safety
+                    self.root.after(0, lambda: self.log_widget.log(msg, gui_level))
+                except:
+                    pass  # Ignore logging errors
+        
+        # Configure logging
+        logging.basicConfig(level=logging.INFO)
+        
+        # Setup GUI handler for resources module
+        gui_handler = GUILogHandler(self.log_widget, self.root)
+        gui_handler.setFormatter(logging.Formatter('%(message)s'))
+        
+        # Add handler to resources module logger
+        resources_logger = logging.getLogger('core.resources')
+        resources_logger.addHandler(gui_handler)
+        resources_logger.setLevel(logging.INFO)
+    
     def pick_file(self):
         """Handle file selection dialog."""
         filepath = filedialog.askopenfilename(
@@ -419,6 +465,12 @@ class DumpGUI:
         """Stop the extraction process."""
         self.stop_monitoring.set()
         self.log_widget.log("Stopping extraction process...", 'warning')
+        
+        # Terminate all monitored processes when user stops
+        try:
+            self._terminate_all_monitored_processes()
+        except Exception as e:
+            self.log_widget.log(f"Error during process termination: {str(e)}", 'warning')
     
     def update_process_list(self):
         """Update the process list display - thread safe version."""
@@ -458,6 +510,21 @@ class DumpGUI:
         total_scripts = 0
         
         try:
+            # Phase 0: Extract from resources first (if enabled)
+            if self.extract_resources.get():
+                self.progress_widget.set_phase("📦 Extracting resources", "Analyzing RCDATA resources...")
+                self.progress_widget.set_progress(2)
+                
+                try:
+                    resource_scripts = extract_scripts_from_resources(self.exe, DEFAULT_OUTPUT_DIR)
+                    if resource_scripts > 0:
+                        self.log_widget.log(f"Found {resource_scripts} script(s) in RCDATA resources", 'success')
+                        total_scripts += resource_scripts
+                    else:
+                        self.log_widget.log("No scripts found in RCDATA resources", 'info')
+                except Exception as e:
+                    self.log_widget.log(f"Resource extraction failed: {str(e)}", 'warning')
+            
             # Phase 1: Initialize process
             self.progress_widget.set_phase("🚀 Initializing", "Starting target process...")
             self.progress_widget.set_progress(5)
@@ -493,20 +560,30 @@ class DumpGUI:
                 self.progress_widget.set_phase("🔍 Detecting child processes", "Waiting for spawned processes...")
                 self.progress_widget.set_progress(40)
                 
-                self._wait_for_child_processes()
+                self._wait_for_child_processes(main_pid)
             
             # Phase 5: Script extraction
             if not self.stop_monitoring.is_set():
                 self.progress_widget.set_phase("📜 Extracting scripts", "Processing all detected processes...")
                 self.progress_widget.set_progress(60)
                 
-                total_scripts = self._extract_from_all_processes(main_pid)
+                # Check if we have any active processes to analyze
+                active_pids = get_active_pids(self.monitored_pids)
+                if not active_pids:
+                    error_msg = "No active processes available for analysis"
+                    self.log_widget.log(error_msg, 'error')
+                    if total_scripts == 0:  # Only raise error if no scripts found via resources
+                        raise Exception(error_msg)
+                else:
+                    memory_scripts = self._extract_from_all_processes(main_pid)
+                    total_scripts += memory_scripts
+                    self.log_widget.log(f"Memory extraction: {memory_scripts} script(s) found", 'info')
             
             # Phase 6: Cleanup
             self.progress_widget.set_phase("🧹 Cleanup", "Terminating processes...")
             self.progress_widget.set_progress(90)
             
-            terminate_process_safely(main_pid)
+            self._terminate_all_monitored_processes()
             
             # Phase 7: Complete
             self.progress_widget.set_phase("✅ Complete", f"Extracted {total_scripts} script(s)")
@@ -523,6 +600,12 @@ class DumpGUI:
             self.stop_monitoring.set()
             if monitor_thread:
                 monitor_thread.join(timeout=5)
+            
+            # Ensure all processes are terminated even if there was an error
+            try:
+                self._terminate_all_monitored_processes()
+            except Exception as e:
+                self.log_widget.log(f"Error during final cleanup: {str(e)}", 'warning')
             
             # Reset UI state
             self.root.after(0, lambda: self.run_button.config(state='normal'))
@@ -551,23 +634,53 @@ class DumpGUI:
             
         return main_process_unpacked, main_process_terminated
     
-    def _wait_for_child_processes(self):
+    def _wait_for_child_processes(self, main_pid):
         """Wait for child processes with progress updates."""
         self.log_widget.log("Monitoring for child processes...", 'info')
         
         # Wait longer for subprocesses to appear and stabilize
         wait_cycles = 15  # Increased from 5 to 15 (30 seconds total)
+        main_process_died_at_cycle = None
         
         for i in range(wait_cycles):
             if self.stop_monitoring.is_set():
                 break
+            
+            # Check if main process is still alive
+            main_process_info = get_process_info(main_pid)
+            if not main_process_info['exists']:
+                if main_process_died_at_cycle is None:
+                    main_process_died_at_cycle = i
+                    self.log_widget.log("Main process terminated - continuing to monitor for child processes...", 'warning')
+                
+                # Check how long since main process died
+                cycles_since_death = i - main_process_died_at_cycle
+                
+                # Give more time for child processes to appear after main process death
+                if cycles_since_death >= 5:  # 10 seconds after main process death
+                    active_children = [pid for pid in self.monitored_pids if pid != main_pid and get_process_info(pid)['exists']]
+                    
+                    if not active_children:
+                        # Check if we ever had child processes
+                        total_detected = len(self.monitored_pids) - 1  # Subtract main process
+                        if total_detected == 0:
+                            self.log_widget.log("Main process terminated and no child processes found after waiting - stopping monitoring", 'error')
+                            self.stop_monitoring.set()
+                            raise Exception("Main process terminated without spawning child processes")
+                        else:
+                            # Had child processes but they all died
+                            self.log_widget.log("Main process and all child processes terminated - stopping monitoring", 'warning')
+                            break
+                    else:
+                        self.log_widget.log(f"Main process terminated but {len(active_children)} child process(es) still running - continuing...", 'info')
                 
             current_count = len(self.monitored_pids)
             
             # Log progress every few cycles
             if i % 3 == 0:
                 elapsed = (i + 1) * 2
-                self.log_widget.log(f"Waiting for child processes... ({elapsed}s elapsed, {current_count-1} processes detected)", 'info')
+                main_status = "terminated" if main_process_died_at_cycle is not None else "running"
+                self.log_widget.log(f"Waiting for child processes... ({elapsed}s elapsed, {current_count-1} processes detected, main: {main_status})", 'info')
             
             time.sleep(2)  # Check every 2 seconds
             self.update_process_list()
@@ -581,7 +694,8 @@ class DumpGUI:
         
         final_count = len(self.monitored_pids)
         if final_count > 1:  # More than just the main process
-            self.log_widget.log(f"Child process detection complete. Found {final_count-1} child process(es)", 'success')
+            active_children = [pid for pid in self.monitored_pids if pid != main_pid and get_process_info(pid)['exists']]
+            self.log_widget.log(f"Child process detection complete. Found {len(active_children)} active child process(es)", 'success')
         else:
             self.log_widget.log("No child processes detected", 'info')
     
@@ -632,6 +746,34 @@ class DumpGUI:
         
         return total_scripts
     
+    def _terminate_all_monitored_processes(self):
+        """Terminate all monitored processes (main + children)."""
+        active_pids = get_active_pids(self.monitored_pids)
+        
+        if not active_pids:
+            self.log_widget.log("No active processes to terminate", 'info')
+            return
+        
+        self.log_widget.log(f"Terminating {len(active_pids)} process(es)...", 'info')
+        
+        terminated_count = 0
+        for pid in active_pids:
+            try:
+                process_info = get_process_info(pid)
+                if process_info['exists']:
+                    success = terminate_process_safely(pid)
+                    if success:
+                        terminated_count += 1
+                        self.log_widget.log(f"Terminated process {pid} ({process_info['name']})", 'success')
+                    else:
+                        self.log_widget.log(f"Failed to terminate process {pid} ({process_info['name']})", 'warning')
+                else:
+                    self.log_widget.log(f"Process {pid} already terminated", 'info')
+            except Exception as e:
+                self.log_widget.log(f"Error terminating process {pid}: {str(e)}", 'warning')
+        
+        self.log_widget.log(f"Process cleanup complete: {terminated_count}/{len(active_pids)} processes terminated", 'info')
+    
     def _show_final_results(self, total_scripts, main_process_terminated, main_process_unpacked):
         """Show final results with detailed logging."""
         active_processes = len(get_active_pids(self.monitored_pids))
@@ -641,6 +783,10 @@ class DumpGUI:
         self.log_widget.log("=" * 50, 'info')
         self.log_widget.log(f"Total scripts extracted: {total_scripts}", 'success')
         self.log_widget.log(f"Processes analyzed: {active_processes}", 'info')
+        
+        # Show breakdown if resources were also extracted
+        if self.extract_resources.get():
+            self.log_widget.log("Scripts found from: RCDATA resources + process memory", 'info')
         
         if main_process_terminated:
             self.log_widget.log("Note: Main process terminated early", 'warning')
