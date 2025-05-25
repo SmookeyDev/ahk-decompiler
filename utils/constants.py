@@ -1,0 +1,35 @@
+"""
+Constants used throughout the AHK Decompiler project.
+"""
+
+# Memory page protection flags
+PAGE_READABLE = (0x02 | 0x04 | 0x20 | 0x40)  # R, RW, RX, RWX
+
+# Process access rights
+PROCESS_ALL_ACCESS = 0x1F0FFF
+
+# Default settings
+DEFAULT_OUTPUT_DIR = 'dump_scripts'
+DEFAULT_UNPACK_TIMEOUT = 60
+DEFAULT_CHILD_UNPACK_TIMEOUT = 90
+DEFAULT_CHECK_INTERVAL = 1
+DEFAULT_CHILD_CHECK_INTERVAL = 2
+MAX_WORKER_THREADS = 5
+
+# Memory buffer size
+MEMORY_BASIC_INFO_SIZE = 48  # works for 32 and 64 bits
+
+# Script detection patterns
+COMPILER_SIGNATURE = b'COMPILER'
+SCRIPT_END_PATTERN = b'\x00\x00'
+SCRIPT_MINIMUM_HEURISTIC = '::'
+
+# GUI settings
+PROGRESS_BAR_LENGTH = 280
+PROCESS_LIST_HEIGHT = 4
+PROCESS_LIST_WIDTH = 50
+
+# Subprocess specific timeouts
+SUBPROCESS_RETRY_DELAY = 2
+SUBPROCESS_MAX_RETRIES = 3
+SUBPROCESS_EXTENDED_TIMEOUT = 120 
