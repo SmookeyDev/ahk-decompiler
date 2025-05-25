@@ -120,7 +120,7 @@ pip install -r requirements.txt
 
 ### Dependencies
 
-- Python 3.6+
+- Python 3.8+
 - psutil (Process and system utilities)
 - pywin32 (Windows API access)
 - tkinter (GUI framework - usually included with Python)
