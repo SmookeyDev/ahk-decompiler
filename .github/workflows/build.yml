@@ -1,0 +1,86 @@
+name: Build AHK Decompiler
+
+on:
+  push:
+    branches: [ main, master ]
+    tags: [ 'v*' ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+      
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.13'
+        
+    - name: Cache pip dependencies
+      uses: actions/cache@v3
+      with:
+        path: ~\AppData\Local\pip\Cache
+        key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+        restore-keys: |
+          ${{ runner.os }}-pip-
+          
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install pyinstaller
+        
+    - name: Verify project structure
+      run: |
+        echo "Checking project structure..."
+        if (Test-Path "main.py") { Write-Host "✅ main.py found" } else { Write-Host "❌ main.py missing"; exit 1 }
+        if (Test-Path "ahk-decompiler.spec") { Write-Host "✅ ahk-decompiler.spec found" } else { Write-Host "❌ ahk-decompiler.spec missing"; exit 1 }
+        if (Test-Path "version_info.txt") { Write-Host "✅ version_info.txt found" } else { Write-Host "❌ version_info.txt missing"; exit 1 }
+        if (Test-Path "gui") { Write-Host "✅ gui directory found" } else { Write-Host "❌ gui directory missing"; exit 1 }
+        if (Test-Path "core") { Write-Host "✅ core directory found" } else { Write-Host "❌ core directory missing"; exit 1 }
+        if (Test-Path "utils") { Write-Host "✅ utils directory found" } else { Write-Host "❌ utils directory missing"; exit 1 }
+      shell: powershell
+        
+    - name: Build executable
+      run: |
+        pyinstaller ahk-decompiler.spec
+      shell: cmd
+      
+    - name: Test executable
+      run: |
+        if (Test-Path "dist/ahk-decompiler.exe") {
+          Write-Host "✅ Executable built successfully"
+          Get-Item "dist/ahk-decompiler.exe" | Select-Object Name, Length, LastWriteTime
+        } else {
+          Write-Host "❌ Executable not found"
+          exit 1
+        }
+      shell: powershell
+      
+    - name: Upload artifact
+      uses: actions/upload-artifact@v4.3.1
+      with:
+        name: ahk-decompiler-windows
+        path: dist/ahk-decompiler.exe
+      
+    - name: Create Release
+      if: startsWith(github.ref, 'refs/tags/')
+      uses: softprops/action-gh-release@v2
+      with:
+        files: dist/ahk-decompiler.exe
+        draft: false
+        prerelease: false
+        generate_release_notes: true
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} 

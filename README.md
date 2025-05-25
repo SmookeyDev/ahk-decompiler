@@ -1,10 +1,23 @@
+<p align="center">
+  <h1 align="center">AHK Decompiler</h1>
+  <p align="center">🔍 Extract and recover AutoHotkey scripts from compiled executables.</p>
+  <p align="center">
+    <img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License">
+    <img src="https://img.shields.io/badge/python-3.13+-blue.svg" alt="Python">
+    <img src="https://img.shields.io/badge/platform-Windows-lightgrey.svg" alt="Platform">
+    <img src="https://img.shields.io/badge/status-Active-green.svg" alt="Status">
+  </p>
+</p>
+
+---
+
 ## 📝 Table of Contents
 
 - [🧐 About](#-about)
 - [⚡ Features](#-features)
-- [📁 Project Structure](#-project-structure)
 - [💻 Installation](#-installation)
 - [🚀 How to Use](#-how-to-use)
+- [📁 Project Structure](#-project-structure)
 - [🔧 Technical Details](#-technical-details)
 - [🔒 Security Considerations](#-security-considerations)
 - [🎯 Supported Formats](#-supported-formats)
@@ -30,6 +43,116 @@ This repository contains an AutoHotkey (AHK) Decompiler/Dumper developed by Smoo
 | Activity Logging            | ✅     | Timestamped logs with color coding                   |
 | Process Monitoring          | ✅     | Enhanced process list with status tracking           |
 | Enhanced Subprocess Support | ✅     | Advanced detection and extraction for subprocesses   |
+
+## 💻 Installation
+
+### Option 1: Pre-built Executable (Recommended for most users)
+
+1. **Download** the latest `ahk-decompiler.exe` from [Releases](https://github.com/SmookeyDev/ahk-decompiler/releases)
+2. **Run** the executable directly - no installation needed!
+3. **Optional**: Run as administrator for enhanced process access
+
+### Option 2: From Source
+
+#### Prerequisites
+
+- **Python 3.13.3+** (recommended)
+- **Windows OS** (required for Windows API access)
+- **Administrator privileges** (may be required for some processes)
+
+#### Quick Setup
+
+1. **Clone the repository:**
+
+   ```bash
+   git clone https://github.com/SmookeyDev/ahk-decompiler.git
+   cd ahk-decompiler
+   ```
+2. **Install dependencies:**
+
+   ```bash
+   pip install -r requirements.txt
+   ```
+3. **Run the application:**
+
+   ```bash
+   python main.py
+   ```
+
+#### Dependencies Overview
+
+The project uses the following Python packages:
+
+- **psutil>=7.0.0** - Process and system utilities
+- **pywin32>=310** - Windows API access for memory operations
+- **tkinter** - GUI framework (usually included with Python)
+
+All dependencies are automatically installed via `requirements.txt`.
+
+## 🚀 How to Use
+
+### GUI Mode (Recommended)
+
+1. **Launch the application:**
+
+   - **Pre-built Executable**: Double-click `ahk-decompiler.exe`
+   - **From Source**: Run `python main.py`
+2. **Configure extraction settings:**
+
+   - Click "Browse..." to select your compiled AHK executable
+   - Enable "Monitor child processes" for comprehensive extraction
+   - Enable "Extract from RCDATA resources" for packed executables
+   - Enable "Auto-open output folder" for convenience
+3. **Start extraction:**
+
+   - Click "🚀 Start Extraction" to begin the process
+   - Monitor real-time progress through the multi-phase progress bar
+   - Watch detailed activity logs with timestamps and color coding
+4. **Monitor progress phases:**
+
+   - **Phase 0**: 📦 Extracting resources - Analyzing RCDATA resources (if enabled)
+   - **Phase 1**: 🚀 Initializing - Starting target process
+   - **Phase 2**: 👁 Setting up monitoring - Child process detection
+   - **Phase 3**: ⏳ Waiting for unpacking - Memory analysis
+   - **Phase 4**: 🔍 Detecting child processes - Process enumeration
+   - **Phase 5**: 📜 Extracting scripts - Script extraction
+   - **Phase 6**: 🧹 Cleanup - Process termination
+   - **Phase 7**: ✅ Complete - Results summary
+5. **Review results:**
+
+   - Check the activity log for detailed extraction information
+   - Click "📁 Open Output Folder" to view extracted scripts
+   - Review process status in the monitored processes table
+
+### Advanced Features
+
+- **Stop/Resume**: Use the "⏹ Stop" button to halt extraction at any time
+- **Log Management**: Clear logs with the "Clear Log" button for new sessions
+- **Real-time Monitoring**: Watch process status updates in real-time
+- **Error Handling**: Detailed error messages with troubleshooting suggestions
+
+### Programmatic Usage
+
+The modular structure allows for easy integration into other projects:
+
+```python
+from core.extractor import extract_scripts, process_single_pid
+from core.monitor import get_active_pids
+from core.memory import wait_for_unpack
+from core.resources import extract_scripts_from_resources
+
+# Extract from a specific PID
+scripts_count = extract_scripts(pid, 'output_directory')
+
+# Extract from RCDATA resources
+resource_scripts = extract_scripts_from_resources('executable.exe', 'output_directory')
+
+# Process with full analysis
+result = process_single_pid(pid, is_main_process=True)
+
+# Wait for process unpacking
+unpacked = wait_for_unpack(pid, timeout=60)
+```
 
 ## 📁 Project Structure
 
@@ -104,158 +227,33 @@ ahk-decompiler/
   - Script detection patterns and heuristics
   - GUI settings and dimensions
 
-#### Root Files
-
-- **`main.py`**: Application entry point with error handling
-- **`requirements.txt`**: Python package dependencies
-- **`.gitignore`**: Git ignore patterns for Python projects
-
-## 💻 Installation
-
-### Prerequisites
-
-```bash
-pip install -r requirements.txt
-```
-
-### Dependencies
-
-- Python 3.8+
-- psutil (Process and system utilities)
-- pywin32 (Windows API access)
-- tkinter (GUI framework - usually included with Python)
-
-### Download and Setup
-
-```bash
-git clone https://github.com/SmookeyDev/ahk-decompiler.git
-cd ahk-decompiler
-pip install -r requirements.txt
-```
-
-## 🚀 How to Use
-
-### GUI Mode (Recommended)
-
-1. **Launch the application:**
-
-```bash
-python main.py
-```
-
-2. **Configure extraction settings:**
-
-   - Click "Browse..." to select your compiled AHK executable
-   - Enable "Monitor child processes" for comprehensive extraction
-   - Enable "Extract from RCDATA resources" for packed executables
-   - Enable "Auto-open output folder" for convenience
-3. **Start extraction:**
-
-   - Click "🚀 Start Extraction" to begin the process
-   - Monitor real-time progress through the multi-phase progress bar
-   - Watch detailed activity logs with timestamps and color coding
-4. **Monitor progress:**
-
-   - **Phase 0**: 📦 Extracting resources - Analyzing RCDATA resources (if enabled)
-   - **Phase 1**: 🚀 Initializing - Starting target process
-   - **Phase 2**: 👁 Setting up monitoring - Child process detection
-   - **Phase 3**: ⏳ Waiting for unpacking - Memory analysis
-   - **Phase 4**: 🔍 Detecting child processes - Process enumeration
-   - **Phase 5**: 📜 Extracting scripts - Script extraction
-   - **Phase 6**: 🧹 Cleanup - Process termination
-   - **Phase 7**: ✅ Complete - Results summary
-5. **Review results:**
-
-   - Check the activity log for detailed extraction information
-   - Click "📁 Open Output Folder" to view extracted scripts
-   - Review process status in the monitored processes table
-
-### Advanced Features
-
-- **Stop/Resume**: Use the "⏹ Stop" button to halt extraction at any time
-- **Log Management**: Clear logs with the "Clear Log" button for new sessions
-- **Real-time Monitoring**: Watch process status updates in real-time
-- **Error Handling**: Detailed error messages with troubleshooting suggestions
-
-### Command Line Integration
-
-The modular structure allows for easy integration into other projects:
-
-```python
-from core.extractor import extract_scripts, process_single_pid
-from core.monitor import get_active_pids
-from core.memory import wait_for_unpack
-from core.resources import extract_scripts_from_resources
-
-# Extract from a specific PID
-scripts_count = extract_scripts(pid, 'output_directory')
-
-# Extract from RCDATA resources
-resource_scripts = extract_scripts_from_resources('executable.exe', 'output_directory')
-
-# Process with full analysis
-result = process_single_pid(pid, is_main_process=True)
-
-# Wait for process unpacking
-unpacked = wait_for_unpack(pid, timeout=60)
-```
-
-### Advanced Usage
-
-```python
-# Import core modules for custom implementations
-from core import extract_scripts, monitor_child_processes
-from utils.constants import DEFAULT_OUTPUT_DIR, MAX_WORKER_THREADS
-
-# Use individual components
-from core.memory import enum_memory, read_region
-from core.monitor import get_process_info, terminate_process_safely
-```
-
 ## 🔧 Technical Details
 
 The decompiler works through several key phases:
 
-### 0. 📦 **Resource Extraction** (`core.resources`)
+### Memory Scanning & Pattern Matching
 
-- Analyzes PE executable for embedded RCDATA resources
-- Parses PE file structure to locate resource sections
-- Extracts and decodes scripts from resource data
-- Supports multiple text encodings (UTF-8, UTF-16, Latin-1, CP1252)
+- **Memory Analysis**: Scans process memory regions for readable content using Windows API (`VirtualQueryEx`, `ReadProcessMemory`)
+- **Pattern Detection**: Searches for "COMPILER" signatures and script boundaries using null byte patterns
+- **Script Validation**: Applies heuristics to validate and extract script content
 
-### 1. 🔍 **Memory Scanning** (`core.memory`)
+### Resource Extraction
 
-- Analyzes process memory regions for readable content
-- Uses Windows API (`VirtualQueryEx`, `ReadProcessMemory`)
-- Filters by memory protection flags (readable regions only)
+- **PE Analysis**: Parses PE file structure to locate RCDATA resources
+- **Multi-Encoding Support**: Handles UTF-8, UTF-16, Latin-1, and CP1252 encodings
+- **Pattern Recognition**: Detects AutoHotkey-specific syntax and commands
+- **Detection Patterns**: Identifies AutoHotkey directives (`#NoEnv`, `#SingleInstance`), function calls (`SendInput`, `WinActivate`), and hotkey syntax
+- **Advantages**: Works without executing the target process, ideal for packed executables
 
-### 2. 🎯 **Pattern Matching** (`core.extractor`)
+### Process Management
 
-- Searches for "COMPILER" signatures in memory
-- Locates script boundaries using null byte patterns
-- Applies heuristics to validate script content
-
-### 3. 📝 **Script Extraction** (`core.extractor`)
-
-- Extracts text between signature boundaries
-- Handles UTF-8 decoding with error tolerance
-- Saves as individual `.ahk` files
-
-### 4. 🔄 **Process Management** (`core.monitor`)
-
-- Monitors parent and child processes
-- Handles process lifecycle (startup, unpacking, termination)
-- Implements safe process termination
-
-### 5. ⚡ **Parallel Processing** (`gui.main_window`)
-
-- Uses ThreadPoolExecutor for concurrent extraction
-- Limits worker threads to prevent system overload
-- Provides real-time progress updates
+- **Lifecycle Handling**: Manages process startup, unpacking detection, and safe termination
+- **Child Process Monitoring**: Tracks and extracts from spawned subprocesses
+- **Parallel Processing**: Uses ThreadPoolExecutor for concurrent extraction
 
 ### Memory Permissions
 
-The tool scans memory regions with the following permissions:
+The tool scans memory regions with these permissions:
 
 - `PAGE_READABLE` (0x02): Read access
 - `PAGE_READWRITE` (0x04): Read/Write access
@@ -267,89 +265,40 @@ The tool scans memory regions with the following permissions:
 - ⚠️ **Administrator Rights**: May require elevated privileges for some processes
 - 🛡️ **Antivirus Detection**: Some antivirus software may flag memory analysis tools
 - 🔐 **Process Access**: Only works on processes the user has permission to access
-- 📊 **Memory Safety**: Uses safe memory reading with error handling
+- 📊 **Memory Safety**: Uses safe memory reading with comprehensive error handling
 
 ## 🎯 Supported Formats
 
-- ✅ Standard AutoHotkey compiled executables (.exe)
-- ✅ MPRESS packed executables (with auto-unpack detection)
-- ✅ Executables with RCDATA resources (e.g., some Dota 2 related tools)
-- ✅ Multi-script executables
-- ✅ Multiple extraction methods (memory analysis + resource extraction)
-- ⚠️ Encrypted/obfuscated scripts (limited support)
+- ✅ **Standard AutoHotkey compiled executables** (.exe)
+- ✅ **MPRESS packed executables** (with auto-unpack detection)
+- ✅ **Executables with RCDATA resources**
+- ✅ **Multi-script executables**
+- ⚠️ **Encrypted/obfuscated scripts** (limited support)
 
-### File Output
+### Output Structure
 
-Extracted scripts are saved as:
+Extracted scripts are saved with clear naming conventions:
 
 ```
 dump_scripts/
-├── script_1.ahk                    # From memory analysis
-├── script_2.ahk                    # From memory analysis
-├── script_resource_1.ahk           # From RCDATA resources
-├── script_resource_2.ahk           # From RCDATA resources
-└── script_n.ahk
+├── script_[pid]_[number].ahk              # From memory analysis
+├── script_resource_[number].ahk           # From RCDATA resources
+└── script_[pid]_[number]_subprocess.ahk   # From child processes
 ```
 
-**Naming Convention:**
 
-- `script_[pid]_[number].ahk` - Scripts extracted from process memory
-- `script_resource_[number].ahk` - Scripts extracted from PE resources
-- `script_[pid]_[number]_subprocess.ahk` - Scripts from child processes
-
-## 🔧 Resource Extraction Details
-
-### RCDATA Resource Support
-
-The tool includes advanced PE resource extraction capabilities:
-
-#### **How it Works:**
-
-1. **PE Analysis**: Parses the PE file structure to locate the `.rsrc` section
-2. **Resource Directory**: Navigates through the resource directory tree
-3. **RCDATA Detection**: Specifically searches for RT_RCDATA (type 10) resources
-4. **Content Analysis**: Applies heuristics to identify AutoHotkey script patterns
-5. **Multi-Encoding**: Attempts decoding with UTF-8, UTF-16-LE, Latin-1, and CP1252
-
-#### **Detection Patterns:**
-
-The resource extractor looks for these AHK-specific patterns:
-
-- `#NoEnv`, `#SingleInstance`, `#Include`
-- Function calls: `SendInput`, `WinActivate`, `Sleep`, `ControlClick`
-- Hotkey syntax: `::hotkey::`
-- Variable assignments and common AHK commands
-
-#### **Advantages:**
-
-- ✅ Works without executing the target process
-- ✅ Faster extraction for resource-embedded scripts
-- ✅ Supports packed executables where memory analysis might fail
-- ✅ Ideal for automated analysis workflows
-
-#### **When to Use Resource Extraction:**
-
-- When dealing with executables that store scripts as embedded resources
-- For packed or protected executables where memory analysis is difficult
-- When you need static analysis without process execution
-- For batch processing of multiple executables
-
-### Combined Approach
-
-For maximum effectiveness, the tool uses both methods:
-
-1. **Resource extraction first** - Quick analysis of embedded resources
-2. **Memory analysis second** - Deep analysis of running processes
-
-This dual approach ensures comprehensive script recovery from various AutoHotkey compilation methods.
 
 ## 💬 Support
 
 For more information and support:
 
-- 🐛 Issues: Create an issue on GitHub
-- 💡 Feature Requests: Submit via GitHub issues
-- 📚 AutoHotkey Documentation: https://autohotkey.com/docs/
+- 🐛 **Issues**: Create an issue on GitHub
+- 💡 **Feature Requests**: Submit via GitHub issues
+- 📚 **AutoHotkey Documentation**: https://autohotkey.com/docs/
+
+## 📄 License
+
+This project is licensed under the [MIT License](LICENSE).
 
 ---
 
