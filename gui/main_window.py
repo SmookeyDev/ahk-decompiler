@@ -23,6 +23,7 @@ from core.monitor import (
 from core.extractor import process_single_pid
 from core.memory import wait_for_unpack
 from core.resources import extract_scripts_from_resources
+from utils.pe_analyzer import analyze_pe_file, PackerType  # Advanced PE analysis
 
 
 class ModernProgressBar:
@@ -80,6 +81,130 @@ class ModernProgressBar:
         self.status_label.config(text="")
 
 
+class PEAnalysisWidget:
+    """Widget to display PE analysis information."""
+    
+    def __init__(self, parent):
+        self.frame = ttk.LabelFrame(parent, text="PE Analysis", padding=5)
+        self.frame.pack(fill='x', padx=10, pady=5)
+        
+        # Create a frame for the analysis info
+        self.info_frame = ttk.Frame(self.frame)
+        self.info_frame.pack(fill='x')
+        
+        # Analysis labels
+        self.analysis_labels = {}
+        self._create_analysis_display()
+    
+    def _create_analysis_display(self):
+        """Create the analysis display layout."""
+        # Left column
+        left_frame = ttk.Frame(self.info_frame)
+        left_frame.pack(side='left', fill='both', expand=True, padx=(0, 10))
+        
+        # Right column  
+        right_frame = ttk.Frame(self.info_frame)
+        right_frame.pack(side='right', fill='both', expand=True)
+        
+        # File info (left column)
+        ttk.Label(left_frame, text="File Type:", font=('Segoe UI', 9, 'bold')).grid(row=0, column=0, sticky='w', pady=2)
+        self.analysis_labels['file_type'] = ttk.Label(left_frame, text="Not analyzed", foreground='#666666')
+        self.analysis_labels['file_type'].grid(row=0, column=1, sticky='w', padx=(10, 0), pady=2)
+        
+        ttk.Label(left_frame, text="Architecture:", font=('Segoe UI', 9, 'bold')).grid(row=1, column=0, sticky='w', pady=2)
+        self.analysis_labels['architecture'] = ttk.Label(left_frame, text="-", foreground='#666666')
+        self.analysis_labels['architecture'].grid(row=1, column=1, sticky='w', padx=(10, 0), pady=2)
+        
+        ttk.Label(left_frame, text="Compiler:", font=('Segoe UI', 9, 'bold')).grid(row=2, column=0, sticky='w', pady=2)
+        self.analysis_labels['compiler'] = ttk.Label(left_frame, text="-", foreground='#666666')
+        self.analysis_labels['compiler'].grid(row=2, column=1, sticky='w', padx=(10, 0), pady=2)
+        
+        # Packer info (right column)
+        ttk.Label(right_frame, text="Packer:", font=('Segoe UI', 9, 'bold')).grid(row=0, column=0, sticky='w', pady=2)
+        self.analysis_labels['packer'] = ttk.Label(right_frame, text="Not analyzed", foreground='#666666')
+        self.analysis_labels['packer'].grid(row=0, column=1, sticky='w', padx=(10, 0), pady=2)
+        
+        ttk.Label(right_frame, text="Status:", font=('Segoe UI', 9, 'bold')).grid(row=1, column=0, sticky='w', pady=2)
+        self.analysis_labels['status'] = ttk.Label(right_frame, text="-", foreground='#666666')
+        self.analysis_labels['status'].grid(row=1, column=1, sticky='w', padx=(10, 0), pady=2)
+        
+        ttk.Label(right_frame, text="File Size:", font=('Segoe UI', 9, 'bold')).grid(row=2, column=0, sticky='w', pady=2)
+        self.analysis_labels['file_size'] = ttk.Label(right_frame, text="-", foreground='#666666')
+        self.analysis_labels['file_size'].grid(row=2, column=1, sticky='w', padx=(10, 0), pady=2)
+    
+    def update_analysis(self, filepath):
+        """Update the analysis display with file information."""
+        try:
+            # Perform PE analysis
+            result = analyze_pe_file(filepath)
+            
+            if not result.is_pe:
+                self._show_not_pe()
+                return
+            
+            # Update file type
+            file_type = result.additional_info.get('File Type', 'PE Executable')
+            ahk_version = result.additional_info.get('AHK Version', '')
+            if ahk_version:
+                file_type += f" (v{ahk_version})"
+            self.analysis_labels['file_type'].config(text=file_type, foreground='#2c3e50')
+            
+            # Update architecture
+            arch = result.additional_info.get('Architecture', 'Unknown')
+            self.analysis_labels['architecture'].config(text=arch, foreground='#2c3e50')
+            
+            # Update compiler
+            compiler_text = result.compiler.value
+            if result.compiler_version:
+                compiler_text += f" {result.compiler_version}"
+            self.analysis_labels['compiler'].config(text=compiler_text, foreground='#2c3e50')
+            
+            # Update packer
+            packer_text = result.packer.value
+            if result.packer_version:
+                packer_text += f" {result.packer_version}"
+            
+            # Color code packer status
+            if result.packer == PackerType.NONE:
+                packer_color = '#28a745'  # Green for no packer
+            elif result.packer in [PackerType.MPRESS, PackerType.UPX]:
+                packer_color = '#ffc107'  # Yellow for common packers
+            else:
+                packer_color = '#dc3545'  # Red for advanced packers
+            
+            self.analysis_labels['packer'].config(text=packer_text, foreground=packer_color)
+            
+            # Update status
+            status = result.additional_info.get('Packing Status', 'Unknown')
+            status_color = '#28a745' if 'Not Packed' in status else '#ffc107'
+            self.analysis_labels['status'].config(text=status, foreground=status_color)
+            
+            # Update file size
+            file_size = result.additional_info.get('File Size', 'Unknown')
+            self.analysis_labels['file_size'].config(text=file_size, foreground='#2c3e50')
+            
+        except Exception as e:
+            self._show_error(str(e))
+    
+    def _show_not_pe(self):
+        """Show that file is not a valid PE."""
+        self.analysis_labels['file_type'].config(text="Not a valid PE file", foreground='#dc3545')
+        for key in ['architecture', 'compiler', 'packer', 'status', 'file_size']:
+            self.analysis_labels[key].config(text="-", foreground='#666666')
+    
+    def _show_error(self, error):
+        """Show analysis error."""
+        self.analysis_labels['file_type'].config(text=f"Analysis error: {error}", foreground='#dc3545')
+        for key in ['architecture', 'compiler', 'packer', 'status', 'file_size']:
+            self.analysis_labels[key].config(text="-", foreground='#666666')
+    
+    def clear(self):
+        """Clear the analysis display."""
+        self.analysis_labels['file_type'].config(text="Not analyzed", foreground='#666666')
+        for key in ['architecture', 'compiler', 'packer', 'status', 'file_size']:
+            self.analysis_labels[key].config(text="-", foreground='#666666')
+
+
 class LogWidget:
     """Enhanced log widget with timestamps and colored messages."""
     
@@ -90,7 +215,7 @@ class LogWidget:
         # Text widget with scrollbar
         self.text = scrolledtext.ScrolledText(
             self.frame, 
-            height=8, 
+            height=6,  # Reduced height to make room for PE analysis
             wrap=tk.WORD,
             font=('Consolas', 9),
             bg='#f8f9fa',
@@ -247,6 +372,9 @@ class DumpGUI:
         # Progress section
         self._setup_progress_section(main_frame)
         
+        # PE Analysis section
+        self._setup_pe_analysis_section(main_frame)
+        
         # Process monitoring section
         self._setup_process_section(main_frame)
         
@@ -341,6 +469,10 @@ class DumpGUI:
     def _setup_progress_section(self, parent):
         """Setup progress section."""
         self.progress_widget = ModernProgressBar(parent)
+    
+    def _setup_pe_analysis_section(self, parent):
+        """Setup PE analysis section."""
+        self.pe_analysis_widget = PEAnalysisWidget(parent)
     
     def _setup_process_section(self, parent):
         """Setup process monitoring section."""
@@ -448,11 +580,58 @@ class DumpGUI:
             self.exe = filepath
             self.file_path_var.set(filepath)
             self._reset_ui_state()  # Use centralized method to ensure consistent state
-            self.log_widget.log(f"Selected file: {os.path.basename(filepath)}", 'info')
+
+            base_name = os.path.basename(filepath)
+            self.log_widget.log(f"Selected file: {base_name}", 'info')
+
+            # Perform comprehensive PE analysis
+            try:
+                self.pe_analysis_widget.update_analysis(filepath)
+                result = analyze_pe_file(filepath)
+                
+                if result.is_pe:
+                    # Log analysis results
+                    if result.additional_info.get('File Type', '').startswith('AutoHotkey'):
+                        self.log_widget.log("✓ AutoHotkey executable detected", 'success')
+                        ahk_version = result.additional_info.get('AHK Version', '')
+                        if ahk_version:
+                            self.log_widget.log(f"  AHK Version: {ahk_version}", 'info')
+                    else:
+                        self.log_widget.log("⚠ Not an AutoHotkey executable", 'warning')
+                    
+                    # Log packer information
+                    if result.is_packed:
+                        packer_name = result.packer.value
+                        if result.packer_version:
+                            packer_name += f" {result.packer_version}"
+                        confidence = f"{result.confidence:.0%}"
+                        self.log_widget.log(f"📦 Packer detected: {packer_name} ({confidence} confidence)", 'warning')
+                        
+                        # Specific advice for different packers
+                        if result.packer == PackerType.MPRESS:
+                            self.log_widget.log("  MPRESS is commonly used with AHK executables", 'info')
+                        elif result.packer == PackerType.UPX:
+                            self.log_widget.log("  UPX packer detected - may require special handling", 'info')
+                        elif result.packer == PackerType.UNKNOWN:
+                            self.log_widget.log("  Unknown packer - extraction may be challenging", 'warning')
+                    else:
+                        self.log_widget.log("✓ No packer detected", 'success')
+                    
+                    # Log architecture
+                    arch = result.additional_info.get('Architecture', 'Unknown')
+                    self.log_widget.log(f"Architecture: {arch}", 'info')
+                    
+                else:
+                    self.log_widget.log("❌ Not a valid PE executable", 'error')
+                    
+            except Exception as exc:
+                self.log_widget.log(f"PE analysis failed: {exc}", 'warning')
+                self.pe_analysis_widget._show_error(str(exc))
     
     def clear_log(self):
         """Clear the log widget."""
         self.log_widget.clear()
+        self.pe_analysis_widget.clear()
     
     def _reset_ui_state(self):
         """
