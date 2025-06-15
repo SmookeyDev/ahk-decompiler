@@ -1,21 +1,18 @@
 """
-Graphical user interface for the AHK Decompiler.
+Main window for the AHK Decompiler GUI.
 """
 
 import tkinter as tk
-from tkinter import filedialog, ttk, messagebox, scrolledtext
+from tkinter import filedialog, messagebox
 import threading
-import webbrowser
 import subprocess
 import time
 import os
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime
 
 from utils.constants import (
-    DEFAULT_OUTPUT_DIR, MAX_WORKER_THREADS, PROGRESS_BAR_LENGTH,
-    PROCESS_LIST_HEIGHT, PROCESS_LIST_WIDTH
+    DEFAULT_OUTPUT_DIR, MAX_WORKER_THREADS
 )
 from core.monitor import (
     monitor_child_processes, get_process_info, get_active_pids, terminate_process_safely
@@ -23,164 +20,16 @@ from core.monitor import (
 from core.extractor import process_single_pid
 from core.memory import wait_for_unpack
 from core.resources import extract_scripts_from_resources
+from utils.pe_analyzer import analyze_pe_file, PackerType
 
-
-class ModernProgressBar:
-    """Custom progress bar with phases and better visual feedback."""
-    
-    def __init__(self, parent, width=400):
-        self.frame = ttk.Frame(parent)
-        self.frame.pack(fill='x', padx=10, pady=5)
-        
-        # Phase label
-        self.phase_label = ttk.Label(self.frame, text="Ready", font=('Segoe UI', 9, 'bold'))
-        self.phase_label.pack(anchor='w')
-        
-        # Progress bar
-        self.progressbar = ttk.Progressbar(
-            self.frame, 
-            length=width, 
-            mode='determinate',
-            style='Custom.Horizontal.TProgressbar'
-        )
-        self.progressbar.pack(fill='x', pady=(2, 0))
-        
-        # Status label
-        self.status_label = ttk.Label(self.frame, text="", font=('Segoe UI', 8))
-        self.status_label.pack(anchor='w')
-        
-        # Configure custom style
-        self.setup_style()
-    
-    def setup_style(self):
-        """Setup custom progressbar style."""
-        style = ttk.Style()
-        style.configure(
-            'Custom.Horizontal.TProgressbar',
-            troughcolor='#e0e0e0',
-            background='#4CAF50',
-            lightcolor='#4CAF50',
-            darkcolor='#4CAF50'
-        )
-    
-    def set_phase(self, phase, status=""):
-        """Set the current phase and status."""
-        self.phase_label.config(text=phase)
-        self.status_label.config(text=status)
-    
-    def set_progress(self, value, maximum=100):
-        """Set progress value."""
-        self.progressbar.config(maximum=maximum)
-        self.progressbar.config(value=value)
-    
-    def reset(self):
-        """Reset progress bar."""
-        self.progressbar.config(value=0)
-        self.phase_label.config(text="Ready")
-        self.status_label.config(text="")
-
-
-class LogWidget:
-    """Enhanced log widget with timestamps and colored messages."""
-    
-    def __init__(self, parent):
-        self.frame = ttk.LabelFrame(parent, text="Activity Log", padding=5)
-        self.frame.pack(fill='both', expand=True, padx=10, pady=5)
-        
-        # Text widget with scrollbar
-        self.text = scrolledtext.ScrolledText(
-            self.frame, 
-            height=8, 
-            wrap=tk.WORD,
-            font=('Consolas', 9),
-            bg='#f8f9fa',
-            fg='#333333'
-        )
-        self.text.pack(fill='both', expand=True)
-        
-        # Configure text tags for colored output
-        self.text.tag_configure('info', foreground='#0066cc')
-        self.text.tag_configure('success', foreground='#28a745')
-        self.text.tag_configure('warning', foreground='#ffc107')
-        self.text.tag_configure('error', foreground='#dc3545')
-        self.text.tag_configure('timestamp', foreground='#6c757d', font=('Consolas', 8))
-    
-    def log(self, message, level='info'):
-        """Add a log message with timestamp."""
-        timestamp = datetime.now().strftime('%H:%M:%S')
-        
-        self.text.insert(tk.END, f"[{timestamp}] ", 'timestamp')
-        self.text.insert(tk.END, f"{message}\n", level)
-        
-        # Auto-scroll to bottom
-        self.text.see(tk.END)
-        
-        # Update the GUI
-        self.text.update_idletasks()
-    
-    def clear(self):
-        """Clear the log."""
-        self.text.delete(1.0, tk.END)
-
-
-class ProcessListWidget:
-    """Enhanced process list with status indicators."""
-    
-    def __init__(self, parent):
-        self.frame = ttk.LabelFrame(parent, text="Monitored Processes", padding=5)
-        self.frame.pack(fill='x', padx=10, pady=5)
-        
-        # Treeview for better process display
-        columns = ('PID', 'Name', 'Status')
-        self.tree = ttk.Treeview(self.frame, columns=columns, show='headings', height=6)
-        
-        # Configure columns
-        self.tree.heading('PID', text='PID')
-        self.tree.heading('Name', text='Process Name')
-        self.tree.heading('Status', text='Status')
-        
-        self.tree.column('PID', width=80)
-        self.tree.column('Name', width=200)
-        self.tree.column('Status', width=120)
-        
-        # Scrollbar
-        scrollbar = ttk.Scrollbar(self.frame, orient='vertical', command=self.tree.yview)
-        self.tree.configure(yscrollcommand=scrollbar.set)
-        
-        # Pack
-        self.tree.pack(side='left', fill='both', expand=True)
-        scrollbar.pack(side='right', fill='y')
-        
-        # Status tracking
-        self.process_status = {}
-    
-    def update_processes(self, monitored_pids):
-        """Update the process list."""
-        # Clear existing items
-        for item in self.tree.get_children():
-            self.tree.delete(item)
-        
-        # Add current processes
-        for pid in monitored_pids:
-            process_info = get_process_info(pid)
-            status = "Running" if process_info['exists'] else "Terminated"
-            
-            self.tree.insert('', tk.END, values=(
-                pid,
-                process_info['name'],
-                status
-            ))
-    
-    def set_process_status(self, pid, status):
-        """Update specific process status."""
-        self.process_status[pid] = status
-        
-        # Find and update the item
-        for item in self.tree.get_children():
-            values = self.tree.item(item, 'values')
-            if values and int(values[0]) == pid:
-                self.tree.item(item, values=(values[0], values[1], status))
-                break
+from .components import GUILogHandler
+from .theming import setup_gui_styles
+from .utils import center_window, setup_mousewheel_scrolling, show_completion_message, validate_file_selection
+from .layout import (
+    setup_header_section, setup_config_section, setup_progress_section,
+    setup_pe_analysis_section, setup_process_section, setup_log_section, setup_action_section,
+    setup_scrollable_frame
+)
 
 
 class DumpGUI:
@@ -205,231 +54,64 @@ class DumpGUI:
         self.root.geometry('700x800')
         self.root.minsize(650, 700)
         
-        # Center window
-        self.root.update_idletasks()
-        x = (self.root.winfo_screenwidth() // 2) - (700 // 2)
-        y = (self.root.winfo_screenheight() // 2) - (800 // 2)
-        self.root.geometry(f'700x800+{x}+{y}')
+        center_window(self.root, 700, 800)
     
     def _setup_styles(self):
         """Configure custom styles."""
-        style = ttk.Style()
-        
-        # Use modern theme
-        try:
-            style.theme_use('vista')  # Windows modern theme
-        except:
-            style.theme_use('clam')   # Fallback
-        
-        # Configure custom button styles
-        style.configure(
-            'Primary.TButton',
-            font=('Segoe UI', 10, 'bold')
-        )
-        
-        style.configure(
-            'Secondary.TButton',
-            font=('Segoe UI', 9)
-        )
+        self.style = setup_gui_styles()
     
     def _setup_gui(self):
-        """Set up the enhanced GUI components."""
-        # Main container with padding
-        main_frame = ttk.Frame(self.root, padding=15)
-        main_frame.pack(fill='both', expand=True)
+        """Set up the enhanced GUI components with vertical scrolling."""
+        # Setup scrollable container
+        self.canvas, self.scrollable_frame = setup_scrollable_frame(self.root)
+        setup_mousewheel_scrolling(self.canvas, self.scrollable_frame, self.root)
         
-        # Header section
-        self._setup_header(main_frame)
-        
-        # Configuration section
-        self._setup_config_section(main_frame)
-        
-        # Progress section
-        self._setup_progress_section(main_frame)
-        
-        # Process monitoring section
-        self._setup_process_section(main_frame)
-        
-        # Log section
-        self._setup_log_section(main_frame)
-        
-        # Action buttons section
-        self._setup_action_section(main_frame)
+        # Setup GUI sections
+        self._setup_variables()
+        self._setup_sections()
     
-    def _setup_header(self, parent):
-        """Setup header section."""
-        header_frame = ttk.Frame(parent)
-        header_frame.pack(fill='x', pady=(0, 20))
-        
-        # Title
-        title_label = ttk.Label(
-            header_frame, 
-            text="AutoHotkey Script Decompiler",
-            font=('Segoe UI', 16, 'bold'),
-            foreground='#2c3e50'
-        )
-        title_label.pack()
-        
-        # Subtitle
-        subtitle_label = ttk.Label(
-            header_frame, 
-            text="Extract AHK scripts from compiled executables",
-            font=('Segoe UI', 10),
-            foreground='#7f8c8d'
-        )
-        subtitle_label.pack()
-        
-        # Separator
-        ttk.Separator(header_frame, orient='horizontal').pack(fill='x', pady=(10, 0))
-    
-    def _setup_config_section(self, parent):
-        """Setup configuration section."""
-        config_frame = ttk.LabelFrame(parent, text="Configuration", padding=10)
-        config_frame.pack(fill='x', pady=(0, 10))
-        
-        # File selection
-        file_frame = ttk.Frame(config_frame)
-        file_frame.pack(fill='x', pady=(0, 10))
-        
-        ttk.Label(file_frame, text="Target Executable:").pack(anchor='w')
-        
-        file_select_frame = ttk.Frame(file_frame)
-        file_select_frame.pack(fill='x', pady=(5, 0))
-        
+    def _setup_variables(self):
+        """Setup tkinter variables."""
         self.file_path_var = tk.StringVar(value="No file selected")
-        self.file_entry = ttk.Entry(
-            file_select_frame, 
-            textvariable=self.file_path_var,
-            state='readonly',
-            font=('Segoe UI', 9)
-        )
-        self.file_entry.pack(side='left', fill='x', expand=True, padx=(0, 10))
-        
-        self.browse_button = ttk.Button(
-            file_select_frame,
-            text="Browse...",
-            command=self.pick_file,
-            style='Secondary.TButton'
-        )
-        self.browse_button.pack(side='right')
-        
-        # Options
-        options_frame = ttk.Frame(config_frame)
-        options_frame.pack(fill='x')
-        
         self.monitor_children = tk.BooleanVar(value=True)
-        ttk.Checkbutton(
-            options_frame,
-            text="Monitor child processes (recommended)",
-            variable=self.monitor_children
-        ).pack(anchor='w')
-        
         self.extract_resources = tk.BooleanVar(value=True)
-        ttk.Checkbutton(
-            options_frame,
-            text="Extract from RCDATA resources (for some packed executables)",
-            variable=self.extract_resources
-        ).pack(anchor='w')
-        
         self.auto_open = tk.BooleanVar(value=True)
-        ttk.Checkbutton(
-            options_frame,
-            text="Auto-open output folder when complete",
-            variable=self.auto_open
-        ).pack(anchor='w')
     
-    def _setup_progress_section(self, parent):
-        """Setup progress section."""
-        self.progress_widget = ModernProgressBar(parent)
-    
-    def _setup_process_section(self, parent):
-        """Setup process monitoring section."""
-        self.process_widget = ProcessListWidget(parent)
-    
-    def _setup_log_section(self, parent):
-        """Setup log section."""
-        self.log_widget = LogWidget(parent)
-    
-    def _setup_action_section(self, parent):
-        """Setup action buttons section."""
-        action_frame = ttk.Frame(parent)
-        action_frame.pack(fill='x', pady=(10, 0))
+    def _setup_sections(self):
+        """Setup all GUI sections."""
+        # Header
+        self.header_frame = setup_header_section(self.scrollable_frame)
         
-        # Left side buttons
-        left_frame = ttk.Frame(action_frame)
-        left_frame.pack(side='left')
-        
-        self.run_button = ttk.Button(
-            left_frame,
-            text="🚀 Start Extraction",
-            command=self.start_dump,
-            state='disabled',
-            style='Primary.TButton'
+        # Configuration
+        self.config_frame, self.file_entry, self.browse_button = setup_config_section(
+            self.scrollable_frame, self.file_path_var, self.pick_file,
+            self.monitor_children, self.extract_resources, self.auto_open
         )
-        self.run_button.pack(side='left', padx=(0, 10))
         
-        self.stop_button = ttk.Button(
-            left_frame,
-            text="⏹ Stop",
-            command=self.stop_extraction,
-            state='disabled',
-            style='Secondary.TButton'
+        # Progress
+        self.progress_widget = setup_progress_section(self.scrollable_frame)
+        
+        # PE Analysis
+        self.pe_analysis_widget = setup_pe_analysis_section(self.scrollable_frame)
+        
+        # Process monitoring
+        self.process_widget = setup_process_section(self.scrollable_frame)
+        
+        # Log
+        self.log_widget = setup_log_section(self.scrollable_frame)
+        
+        # Action buttons
+        self.action_frame, self.run_button, self.stop_button, self.clear_log_button, self.open_folder_button = setup_action_section(
+            self.scrollable_frame, self.start_dump, self.stop_extraction, self.clear_log
         )
-        self.stop_button.pack(side='left', padx=(0, 10))
-        
-        # Right side buttons
-        right_frame = ttk.Frame(action_frame)
-        right_frame.pack(side='right')
-        
-        self.clear_log_button = ttk.Button(
-            right_frame,
-            text="Clear Log",
-            command=self.clear_log,
-            style='Secondary.TButton'
-        )
-        self.clear_log_button.pack(side='left', padx=(0, 10))
-        
-        self.open_folder_button = ttk.Button(
-            right_frame,
-            text="📁 Open Output Folder",
-            command=self.open_output_folder,
-            state='disabled',
-            style='Secondary.TButton'
-        )
-        self.open_folder_button.pack(side='left')
     
     def _setup_logging(self):
         """Setup logging to redirect to GUI log widget."""
-        class GUILogHandler(logging.Handler):
-            def __init__(self, log_widget, root):
-                super().__init__()
-                self.log_widget = log_widget
-                self.root = root
-            
-            def emit(self, record):
-                try:
-                    msg = self.format(record)
-                    level_map = {
-                        'DEBUG': 'info',
-                        'INFO': 'info', 
-                        'WARNING': 'warning',
-                        'ERROR': 'error',
-                        'CRITICAL': 'error'
-                    }
-                    gui_level = level_map.get(record.levelname, 'info')
-                    # Use root.after to ensure thread safety
-                    self.root.after(0, lambda: self.log_widget.log(msg, gui_level))
-                except:
-                    pass  # Ignore logging errors
-        
-        # Configure logging
         logging.basicConfig(level=logging.INFO)
         
-        # Setup GUI handler for resources module
         gui_handler = GUILogHandler(self.log_widget, self.root)
         gui_handler.setFormatter(logging.Formatter('%(message)s'))
         
-        # Add handler to resources module logger
         resources_logger = logging.getLogger('core.resources')
         resources_logger.addHandler(gui_handler)
         resources_logger.setLevel(logging.INFO)
@@ -447,49 +129,73 @@ class DumpGUI:
         if filepath:
             self.exe = filepath
             self.file_path_var.set(filepath)
-            self._reset_ui_state()  # Use centralized method to ensure consistent state
-            self.log_widget.log(f"Selected file: {os.path.basename(filepath)}", 'info')
+            self._reset_ui_state()
+
+            base_name = os.path.basename(filepath)
+            self.log_widget.log(f"Selected file: {base_name}", 'info')
+
+            try:
+                self.pe_analysis_widget.update_analysis(filepath)
+                result = analyze_pe_file(filepath)
+                
+                if result.is_pe:
+                    if result.additional_info.get('File Type', '').startswith('AutoHotkey'):
+                        self.log_widget.log("✓ AutoHotkey executable detected", 'success')
+                        ahk_version = result.additional_info.get('AHK Version', '')
+                        if ahk_version:
+                            self.log_widget.log(f"  AHK Version: {ahk_version}", 'info')
+                    else:
+                        self.log_widget.log("⚠ Not an AutoHotkey executable", 'warning')
+                    
+                    if result.is_packed:
+                        packer_name = result.packer.value
+                        if result.packer_version:
+                            packer_name += f" {result.packer_version}"
+                        confidence = f"{result.confidence:.0%}"
+                        self.log_widget.log(f"📦 Packer detected: {packer_name} ({confidence} confidence)", 'warning')
+                        
+                        if result.packer == PackerType.MPRESS:
+                            self.log_widget.log("  MPRESS is commonly used with AHK executables", 'info')
+                        elif result.packer == PackerType.UPX:
+                            self.log_widget.log("  UPX packer detected - may require special handling", 'info')
+                        elif result.packer == PackerType.UNKNOWN:
+                            self.log_widget.log("  Unknown packer - extraction may be challenging", 'warning')
+                    else:
+                        self.log_widget.log("✓ No packer detected", 'success')
+                    
+                    arch = result.additional_info.get('Architecture', 'Unknown')
+                    self.log_widget.log(f"Architecture: {arch}", 'info')
+                    
+                else:
+                    self.log_widget.log("❌ Not a valid PE executable", 'error')
+                    
+            except Exception as exc:
+                self.log_widget.log(f"PE analysis failed: {exc}", 'warning')
+                self.pe_analysis_widget._show_error(str(exc))
     
     def clear_log(self):
         """Clear the log widget."""
         self.log_widget.clear()
+        self.pe_analysis_widget.clear()
     
     def _reset_ui_state(self):
-        """
-        Reset UI state to ready state - centralized button control.
-        
-        This method ensures that:
-        - Start button is enabled only if a file is selected
-        - Stop button is always disabled (ready state)
-        - Open folder button remains in its current state (controlled by extraction results)
-        - Called when process finishes, is stopped, or file is selected
-        """
+        """Reset UI state to ready state - centralized button control."""
         try:
             self.run_button.config(state='normal' if self.exe else 'disabled')
             self.stop_button.config(state='disabled')
-            # Note: open_folder_button state is managed separately based on extraction results
         except Exception:
-            pass  # Ignore any GUI errors during cleanup
-    
-    def open_output_folder(self):
-        """Open the output folder."""
-        if os.path.exists(DEFAULT_OUTPUT_DIR):
-            webbrowser.open(DEFAULT_OUTPUT_DIR)
-        else:
-            messagebox.showwarning("Folder Not Found", f"Output folder '{DEFAULT_OUTPUT_DIR}' does not exist yet.")
+            pass
     
     def stop_extraction(self):
         """Stop the extraction process."""
         self.stop_monitoring.set()
         self.log_widget.log("Stopping extraction process...", 'warning')
         
-        # Terminate all monitored processes when user stops
         try:
             self._terminate_all_monitored_processes()
         except Exception as e:
             self.log_widget.log(f"Error during process termination: {str(e)}", 'warning')
         
-        # Reset UI state immediately when user stops
         self._reset_ui_state()
     
     def update_process_list(self):
@@ -502,8 +208,7 @@ class DumpGUI:
     
     def start_dump(self):
         """Start the dump process in a separate thread."""
-        if not self.exe:
-            messagebox.showerror("No File Selected", "Please select an executable file first.")
+        if not validate_file_selection(self.exe):
             return
         
         # Reset UI state
@@ -817,18 +522,10 @@ class DumpGUI:
             self.log_widget.log(f"Scripts saved to: {DEFAULT_OUTPUT_DIR}/", 'success')
             
             if self.auto_open.get():
-                self.open_output_folder()
+                from .utils import open_output_folder
+                open_output_folder()
         else:
             self.log_widget.log("No scripts found. Try running as administrator or verify the executable contains AHK scripts.", 'warning')
         
         # Show completion message
-        if total_scripts > 0:
-            messagebox.showinfo(
-                "Extraction Complete", 
-                f"Successfully extracted {total_scripts} script(s)!\n\nScripts saved to '{DEFAULT_OUTPUT_DIR}' folder."
-            )
-        else:
-            messagebox.showwarning(
-                "No Scripts Found",
-                "No AHK scripts were found in the target executable.\n\nTry:\n• Running as administrator\n• Verifying the file contains AHK scripts\n• Checking the log for details"
-            ) 
+        show_completion_message(total_scripts) 
