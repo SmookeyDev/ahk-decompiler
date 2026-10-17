@@ -1,187 +1,139 @@
-"""
-Memory utilities for process memory manipulation and analysis.
-"""
+"""Read-only memory access, cancellation and backwards-compatible convenience APIs."""
 
-import ctypes
+from __future__ import annotations
+
+import threading
 import time
+import struct
+
 import psutil
-import win32con
-from utils.constants import (
-    PAGE_READABLE, PROCESS_ALL_ACCESS, MEMORY_BASIC_INFO_SIZE,
-    COMPILER_SIGNATURE, DEFAULT_UNPACK_TIMEOUT, DEFAULT_CHECK_INTERVAL
-)
+
+from .winapi import WindowsAPI
 
 
-def enum_memory(proc):
-    """
-    Enumerate memory regions of a process.
-    
-    Args:
-        proc: Process handle
-        
-    Yields:
-        tuple: (base_address, size, state, protection) for each memory region
-    """
-    mbi = ctypes.create_string_buffer(MEMORY_BASIC_INFO_SIZE)
-    addr = 0
-    while ctypes.windll.kernel32.VirtualQueryEx(proc, ctypes.c_void_p(addr), mbi, MEMORY_BASIC_INFO_SIZE):
-        base = ctypes.c_void_p.from_buffer(mbi).value
-        size = int.from_bytes(mbi.raw[24:32], 'little')
-        state = int.from_bytes(mbi.raw[32:36], 'little')
-        protect = int.from_bytes(mbi.raw[36:40], 'little')
-        yield base, size, state, protect
-        addr += size
+def is_readable_region(state: int, protect: int) -> bool:
+    return (
+        state == 0x1000
+        and not (protect & 0x100)
+        and (protect & 0xFF)
+        in {
+            0x02,
+            0x04,
+            0x08,
+            0x20,
+            0x40,
+            0x80,
+        }
+    )
 
 
-def read_region(proc, base, size):
-    """
-    Read a memory region from a process.
-    
-    Args:
-        proc: Process handle
-        base: Base address to read from
-        size: Number of bytes to read
-        
-    Returns:
-        bytes: The read memory data, or empty bytes if failed
-    """
-    buf = ctypes.create_string_buffer(size)
-    br = ctypes.c_size_t(0)
-    if ctypes.windll.kernel32.ReadProcessMemory(proc, ctypes.c_void_p(base),
-                                               buf, size, ctypes.byref(br)):
-        return buf.raw[:br.value]
-    return b''
+class ProcessMemory:
+    def __init__(self, pid: int, *, create_time: float | None = None, api=None):
+        self.pid = pid
+        self.api = api if api is not None else WindowsAPI()
+        process = psutil.Process(pid)
+        self.created = process.create_time()
+        if create_time is not None and self.created != create_time:
+            raise ProcessLookupError(f"PID {pid} was reused")
+        self.process = process
+        self.handle = self.api.open(pid)
+        try:
+            if not process.is_running() or process.create_time() != self.created:
+                raise ProcessLookupError(f"PID {pid} changed while opening it")
+            self.architecture = self.api.architecture(self.handle)
+        except BaseException:
+            self.close()
+            raise
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        self.close()
+
+    def close(self):
+        if self.handle:
+            self.api.close(self.handle)
+            self.handle = None
+
+    def alive(self):
+        return self.process.is_running() and self.process.status() != psutil.STATUS_ZOMBIE
+
+    def regions(self):
+        return self.api.regions(self.handle)
+
+    def read(self, address: int, size: int):
+        return self.api.read(self.handle, address, size)
+
+    def module_base(self, *, read=None, cancel=None, deadline=None):
+        try:
+            return self.api.module_base(self.handle)
+        except OSError:
+            # PSAPI can fail across architectures or while the loader is changing.
+            # A mapped non-DLL PE image is an independent way to locate the main image.
+            seen = set()
+            for index, region in enumerate(self.api.regions(self.handle)):
+                if (cancel is not None and cancel.is_set()) or (
+                    deadline is not None and time.monotonic() >= deadline
+                ):
+                    raise InterruptedError("Module lookup cancelled or deadline expired")
+                if index >= 4096:
+                    break
+                base = region.allocation_base
+                if region.type != 0x1000000 or not base or base in seen:
+                    continue
+                seen.add(base)
+                header = read(base, 4096) if read else self.api.read(self.handle, base, 4096).data
+                if len(header) < 64 or header[:2] != b"MZ":
+                    continue
+                offset = struct.unpack_from("<I", header, 60)[0]
+                if offset + 24 <= len(header) and header[offset : offset + 4] == b"PE\0\0":
+                    characteristics = struct.unpack_from("<H", header, offset + 22)[0]
+                    if not characteristics & 0x2000:
+                        return base
+            raise
+
+
+_api = None
+
+
+def _native():
+    global _api
+    if _api is None:
+        _api = WindowsAPI()
+    return _api
 
 
 def open_process(pid):
-    """
-    Open a process handle with full access rights.
-    
-    Args:
-        pid (int): Process ID
-        
-    Returns:
-        handle: Process handle or None if failed
-    """
-    return ctypes.windll.kernel32.OpenProcess(PROCESS_ALL_ACCESS, False, pid)
+    return _native().open(pid)
 
 
 def close_process(handle):
-    """
-    Close a process handle.
-    
-    Args:
-        handle: Process handle to close
-    """
-    if handle:
-        ctypes.windll.kernel32.CloseHandle(handle)
+    _native().close(handle)
 
 
-def is_readable_region(state, protect):
-    """
-    Check if a memory region is readable.
-    
-    Args:
-        state: Memory state
-        protect: Memory protection flags
-        
-    Returns:
-        bool: True if region is readable, False otherwise
-    """
-    return state == win32con.MEM_COMMIT and (protect & PAGE_READABLE)
+def enum_memory(handle):
+    for region in _native().regions(handle):
+        yield region.base, region.size, region.state, region.protection
 
 
-def wait_for_unpack(pid, timeout=DEFAULT_UNPACK_TIMEOUT, check_interval=DEFAULT_CHECK_INTERVAL):
-    """
-    Wait for a packed executable to unpack in memory.
-    
-    Args:
-        pid (int): Process ID
-        timeout (int): Maximum wait time in seconds
-        check_interval (int): Check interval in seconds
-        
-    Returns:
-        bool: True if unpacked successfully, False otherwise
-    """
-    # First check if process exists
-    if not psutil.pid_exists(pid):
-        print(f"Process {pid} does not exist or has terminated")
-        return False
-        
-    hproc = open_process(pid)
-    if not hproc:
-        return False
+def read_region(handle, base, size):
+    """Legacy bounded read; do not allocate a buffer the size of an entire region."""
+    if size > 4 * 1024 * 1024:
+        raise ValueError("Use the streaming extractor for regions larger than 4 MiB")
+    return _native().read(handle, base, size).data
 
-    t0 = time.time()
-    try:
-        print(f"Waiting for unpack of PID {pid} (timeout: {timeout}s)")
-        
-        # Alternative signatures to look for (not just COMPILER)
-        unpack_signatures = [
-            COMPILER_SIGNATURE,  # Standard signature
-            b'AutoHotkey',       # AutoHotkey string
-            b'SendInput',        # Common AHK function
-            b'WinActivate',      # Common AHK function
-            b'#NoEnv',          # Common AHK directive
-            b'#SingleInstance',  # Common AHK directive
-            b'::'               # Hotkey syntax
-        ]
-        
-        signature_found = False
-        last_check_time = t0
-        
-        while time.time() - t0 < timeout:
-            # Check if process is still alive
-            if not psutil.pid_exists(pid):
-                print(f"Process {pid} terminated during unpack wait")
-                return False
-                
-            current_time = time.time()
-            
-            # Log progress every 10 seconds
-            if current_time - last_check_time >= 10:
-                elapsed = current_time - t0
-                print(f"Still waiting for unpack of PID {pid} ({elapsed:.1f}s elapsed)")
-                last_check_time = current_time
-                
-            for base, size, state, prot in enum_memory(hproc):
-                if not is_readable_region(state, prot):
-                    continue
-                    
-                blob = read_region(hproc, base, size)
-                if not blob:
-                    continue
-                
-                # Check for any of the signatures
-                for signature in unpack_signatures:
-                    if signature in blob:
-                        print(f"Found signature '{signature.decode('utf-8', 'ignore')}' in PID {pid}")
-                        signature_found = True
-                        
-                        # For COMPILER signature, we're definitely unpacked
-                        if signature == COMPILER_SIGNATURE:
-                            print(f"COMPILER signature found - PID {pid} is unpacked")
-                            return True
-                        
-                        # For other signatures, continue looking but note we found something
-                        break
-                
-                # If we found any signature and it's been at least 5 seconds, consider it unpacked
-                if signature_found and (current_time - t0) >= 5:
-                    print(f"Alternative signature found and waited 5s - considering PID {pid} unpacked")
-                    return True
-                    
-            time.sleep(check_interval)
-            
-        # If we found signatures but didn't get COMPILER, still consider it potentially unpacked
-        if signature_found:
-            print(f"Alternative signatures found for PID {pid} - proceeding with extraction")
-            return True
-            
-    except Exception as e:
-        print(f"Error during unpack wait for PID {pid}: {e}")
-    finally:
-        close_process(hproc)
-        
-    print(f"Unpack timeout for PID {pid} after {timeout}s")
-    return False 
+
+def wait_for_unpack(pid, timeout=60, check_interval=0.15, cancel=None):
+    """Ready means a validated, complete script was found, not an unrelated string."""
+    from .extractor import scan_process
+    from .models import ExtractionConfig
+    from pathlib import Path
+
+    result = scan_process(
+        pid,
+        ExtractionConfig(Path("."), timeout=timeout, poll_interval=check_interval),
+        cancel or threading.Event(),
+        deadline=time.monotonic() + timeout,
+    )
+    return any(candidate.complete for candidate in result.candidates)

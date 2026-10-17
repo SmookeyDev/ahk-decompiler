@@ -24,3 +24,8 @@ venv/
 ENV/
 env.bak/
 venv.bak/
+.fixtures/
+.test-tools/
+.ruff_cache/
+*.egg-info/
+.pytest-work/

@@ -1,531 +1,274 @@
-"""
-Main window for the AHK Decompiler GUI.
-"""
+"""Tkinter presentation; all workers communicate through a queue."""
 
-import tkinter as tk
-from tkinter import filedialog, messagebox
+from __future__ import annotations
+
+import json
+import queue
 import threading
-import subprocess
-import time
-import os
-import logging
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import tkinter as tk
+from pathlib import Path
+from tkinter import filedialog, messagebox
 
-from utils.constants import (
-    DEFAULT_OUTPUT_DIR, MAX_WORKER_THREADS
-)
-from core.monitor import (
-    monitor_child_processes, get_process_info, get_active_pids, terminate_process_safely
-)
-from core.extractor import process_single_pid
-from core.memory import wait_for_unpack
-from core.resources import extract_scripts_from_resources
-from utils.pe_analyzer import analyze_pe_file, PackerType
+from core.engine import ExtractionEngine, analyze_target
+from core.models import ExtractionConfig, Status
+from core.version import __version__
 
-from .components import GUILogHandler
-from .theming import setup_gui_styles
-from .utils import center_window, setup_mousewheel_scrolling, show_completion_message, validate_file_selection
 from .layout import (
-    setup_header_section, setup_config_section, setup_progress_section,
-    setup_pe_analysis_section, setup_process_section, setup_log_section, setup_action_section,
-    setup_scrollable_frame
+    setup_action_section,
+    setup_config_section,
+    setup_header_section,
+    setup_log_section,
+    setup_pe_analysis_section,
+    setup_process_section,
+    setup_progress_section,
+    setup_scrollable_frame,
 )
+from .theming import setup_gui_styles
+from .utils import center_window, setup_mousewheel_scrolling
+from .utils.file_operations import open_file_in_default_app
 
 
 class DumpGUI:
-    """Modern GUI class for the AHK Decompiler application."""
-    
     def __init__(self, root):
-        """Initialize the enhanced GUI."""
         self.root = root
         self.exe = None
-        self.monitored_pids = set()
-        self.stop_monitoring = threading.Event()
-        self.current_phase = "Ready"
-        
-        self._setup_window()
-        self._setup_styles()
-        self._setup_gui()
-        self._setup_logging()
-        
-    def _setup_window(self):
-        """Configure the main window."""
-        self.root.title('AHK Decompiler - Multi-Process Script Extractor')
-        self.root.geometry('700x800')
-        self.root.minsize(650, 700)
-        
-        center_window(self.root, 700, 800)
-    
-    def _setup_styles(self):
-        """Configure custom styles."""
+        self._events = queue.Queue()
+        self._worker = None
+        self._cancel = None
+        self._generation = 0
+        self._closing = False
+        self._result = None
+        self._processes = {}
+        self._analysis_generation = 0
+        root.title(f"AHK Decompiler {__version__}")
+        root.geometry("780x880")
+        root.minsize(700, 720)
+        center_window(root, 780, 880)
         self.style = setup_gui_styles()
-    
-    def _setup_gui(self):
-        """Set up the enhanced GUI components with vertical scrolling."""
-        # Setup scrollable container
-        self.canvas, self.scrollable_frame = setup_scrollable_frame(self.root)
-        setup_mousewheel_scrolling(self.canvas, self.scrollable_frame, self.root)
-        
-        # Setup GUI sections
-        self._setup_variables()
-        self._setup_sections()
-    
-    def _setup_variables(self):
-        """Setup tkinter variables."""
+        self.canvas, self.scrollable_frame = setup_scrollable_frame(root)
+        setup_mousewheel_scrolling(self.canvas, self.scrollable_frame, root)
         self.file_path_var = tk.StringVar(value="No file selected")
         self.monitor_children = tk.BooleanVar(value=True)
         self.extract_resources = tk.BooleanVar(value=True)
-        self.auto_open = tk.BooleanVar(value=True)
-    
-    def _setup_sections(self):
-        """Setup all GUI sections."""
-        # Header
-        self.header_frame = setup_header_section(self.scrollable_frame)
-        
-        # Configuration
+        self.auto_open = tk.BooleanVar(value=False)
+        self.mode = tk.StringVar(value="Static resources (does not run target)")
+        self.timeout = tk.StringVar(value="30")
+        self.output_path = tk.StringVar(value=str(Path("dump_scripts").resolve()))
+        setup_header_section(self.scrollable_frame)
         self.config_frame, self.file_entry, self.browse_button = setup_config_section(
-            self.scrollable_frame, self.file_path_var, self.pick_file,
-            self.monitor_children, self.extract_resources, self.auto_open
+            self.scrollable_frame,
+            self.file_path_var,
+            self.pick_file,
+            self.monitor_children,
+            self.extract_resources,
+            self.auto_open,
+            self.mode,
+            self.output_path,
+            self.pick_output,
+            self.timeout,
         )
-        
-        # Progress
         self.progress_widget = setup_progress_section(self.scrollable_frame)
-        
-        # PE Analysis
         self.pe_analysis_widget = setup_pe_analysis_section(self.scrollable_frame)
-        
-        # Process monitoring
         self.process_widget = setup_process_section(self.scrollable_frame)
-        
-        # Log
         self.log_widget = setup_log_section(self.scrollable_frame)
-        
-        # Action buttons
-        self.action_frame, self.run_button, self.stop_button, self.clear_log_button, self.open_folder_button = setup_action_section(
-            self.scrollable_frame, self.start_dump, self.stop_extraction, self.clear_log
+        _, self.run_button, self.stop_button, self.clear_log_button, self.open_folder_button = (
+            setup_action_section(self.scrollable_frame, self.start_dump, self.stop_extraction, self.clear_log)
         )
-    
-    def _setup_logging(self):
-        """Setup logging to redirect to GUI log widget."""
-        logging.basicConfig(level=logging.INFO)
-        
-        gui_handler = GUILogHandler(self.log_widget, self.root)
-        gui_handler.setFormatter(logging.Formatter('%(message)s'))
-        
-        resources_logger = logging.getLogger('core.resources')
-        resources_logger.addHandler(gui_handler)
-        resources_logger.setLevel(logging.INFO)
-    
+        self.open_folder_button.config(command=self.open_output)
+        from tkinter import ttk
+
+        ttk.Button(
+            self.scrollable_frame, text="Export diagnostic JSON...", command=self.export_diagnostics
+        ).pack(anchor="e", pady=4)
+        root.protocol("WM_DELETE_WINDOW", self.close)
+        root.after(50, self._drain)
+
+    @property
+    def running(self):
+        return self._worker is not None and self._worker.is_alive()
+
+    def pick_output(self):
+        destination = filedialog.askdirectory(title="Output directory")
+        if destination:
+            self.output_path.set(destination)
+
     def pick_file(self):
-        """Handle file selection dialog."""
-        filepath = filedialog.askopenfilename(
-            title="Select AutoHotkey Executable",
-            filetypes=[
-                ('Executable files', '*.exe'),
-                ('All files', '*.*')
-            ]
+        if self.running:
+            return
+        path = filedialog.askopenfilename(
+            title="Select compiled AutoHotkey file",
+            filetypes=[("Executables", "*.exe"), ("All files", "*.*")],
         )
-        
-        if filepath:
-            self.exe = filepath
-            self.file_path_var.set(filepath)
-            self._reset_ui_state()
+        if not path:
+            return
+        self.exe = path
+        self.file_path_var.set(path)
+        self.run_button.config(state="normal")
+        self._analysis_generation += 1
+        generation = self._analysis_generation
+        self.log_widget.log(f"Selected {Path(path).name}; analyzing headers", "info")
 
-            base_name = os.path.basename(filepath)
-            self.log_widget.log(f"Selected file: {base_name}", 'info')
-
+        def analyze():
             try:
-                self.pe_analysis_widget.update_analysis(filepath)
-                result = analyze_pe_file(filepath)
-                
-                if result.is_pe:
-                    if result.additional_info.get('File Type', '').startswith('AutoHotkey'):
-                        self.log_widget.log("✓ AutoHotkey executable detected", 'success')
-                        ahk_version = result.additional_info.get('AHK Version', '')
-                        if ahk_version:
-                            self.log_widget.log(f"  AHK Version: {ahk_version}", 'info')
-                    else:
-                        self.log_widget.log("⚠ Not an AutoHotkey executable", 'warning')
-                    
-                    if result.is_packed:
-                        packer_name = result.packer.value
-                        if result.packer_version:
-                            packer_name += f" {result.packer_version}"
-                        confidence = f"{result.confidence:.0%}"
-                        self.log_widget.log(f"📦 Packer detected: {packer_name} ({confidence} confidence)", 'warning')
-                        
-                        if result.packer == PackerType.MPRESS:
-                            self.log_widget.log("  MPRESS is commonly used with AHK executables", 'info')
-                        elif result.packer == PackerType.UPX:
-                            self.log_widget.log("  UPX packer detected - may require special handling", 'info')
-                        elif result.packer == PackerType.UNKNOWN:
-                            self.log_widget.log("  Unknown packer - extraction may be challenging", 'warning')
-                    else:
-                        self.log_widget.log("✓ No packer detected", 'success')
-                    
-                    arch = result.additional_info.get('Architecture', 'Unknown')
-                    self.log_widget.log(f"Architecture: {arch}", 'info')
-                    
-                else:
-                    self.log_widget.log("❌ Not a valid PE executable", 'error')
-                    
+                info, _ = analyze_target(Path(path))
+                self._events.put(("analysis", generation, info))
             except Exception as exc:
-                self.log_widget.log(f"PE analysis failed: {exc}", 'warning')
-                self.pe_analysis_widget._show_error(str(exc))
-    
-    def clear_log(self):
-        """Clear the log widget."""
-        self.log_widget.clear()
-        self.pe_analysis_widget.clear()
-    
-    def _reset_ui_state(self):
-        """Reset UI state to ready state - centralized button control."""
-        try:
-            self.run_button.config(state='normal' if self.exe else 'disabled')
-            self.stop_button.config(state='disabled')
-        except Exception:
-            pass
-    
-    def stop_extraction(self):
-        """Stop the extraction process."""
-        self.stop_monitoring.set()
-        self.log_widget.log("Stopping extraction process...", 'warning')
-        
-        try:
-            self._terminate_all_monitored_processes()
-        except Exception as e:
-            self.log_widget.log(f"Error during process termination: {str(e)}", 'warning')
-        
-        self._reset_ui_state()
-    
-    def update_process_list(self):
-        """Update the process list display - thread safe version."""
-        self.root.after(0, self._update_process_list_gui)
-    
-    def _update_process_list_gui(self):
-        """Update the process list display in the main thread."""
-        self.process_widget.update_processes(self.monitored_pids)
-    
+                self._events.put(("analysis", generation, {"error": str(exc)}))
+
+        threading.Thread(target=analyze, daemon=True).start()
+
     def start_dump(self):
-        """Start the dump process in a separate thread."""
-        if not validate_file_selection(self.exe):
+        if self.running or not self.exe:
             return
-        
-        # Reset UI state
-        self.run_button.config(state='disabled')
-        self.stop_button.config(state='normal')
-        self.progress_widget.reset()
-        self.stop_monitoring.clear()
-        self.monitored_pids.clear()
-        self.open_folder_button.config(state='disabled')
-        
-        # Clear and start logging
-        self.log_widget.clear()
-        self.log_widget.log("Starting AHK script extraction process...", 'info')
-        self.log_widget.log(f"Target: {os.path.basename(self.exe)}", 'info')
-        
-        # Start extraction in separate thread
-        threading.Thread(target=self.dump_process, daemon=True).start()
-    
-    def dump_process(self):
-        """Enhanced dump process with detailed progress tracking."""
-        monitor_thread = None
-        main_process_unpacked = False
-        main_process_terminated = False
-        total_scripts = 0
-        
         try:
-            # Phase 0: Extract from resources first (if enabled)
-            if self.extract_resources.get():
-                self.progress_widget.set_phase("📦 Extracting resources", "Analyzing RCDATA resources...")
-                self.progress_widget.set_progress(2)
-                
-                try:
-                    resource_scripts = extract_scripts_from_resources(self.exe, DEFAULT_OUTPUT_DIR)
-                    if resource_scripts > 0:
-                        self.log_widget.log(f"Found {resource_scripts} script(s) in RCDATA resources", 'success')
-                        total_scripts += resource_scripts
-                    else:
-                        self.log_widget.log("No scripts found in RCDATA resources", 'info')
-                except Exception as e:
-                    self.log_widget.log(f"Resource extraction failed: {str(e)}", 'warning')
-            
-            # Phase 1: Initialize process
-            self.progress_widget.set_phase("🚀 Initializing", "Starting target process...")
-            self.progress_widget.set_progress(5)
-            
-            proc = subprocess.Popen(self.exe)
-            main_pid = proc.pid
-            self.monitored_pids.add(main_pid)
-            
-            self.log_widget.log(f"Started main process (PID: {main_pid})", 'success')
-            
-            # Phase 2: Setup monitoring
-            if self.monitor_children.get():
-                self.progress_widget.set_phase("👁 Setting up monitoring", "Starting child process monitor...")
-                self.progress_widget.set_progress(10)
-                
-                monitor_thread = threading.Thread(
-                    target=monitor_child_processes,
-                    args=(main_pid, self.monitored_pids, self.stop_monitoring, self.update_process_list)
-                )
-                monitor_thread.start()
-                self.log_widget.log("Child process monitoring enabled", 'info')
-            
-            self.update_process_list()
-            
-            # Phase 3: Wait for unpacking
-            self.progress_widget.set_phase("⏳ Waiting for unpacking", "Analyzing main process...")
-            self.progress_widget.set_progress(20)
-            
-            main_process_unpacked, main_process_terminated = self._handle_main_process_unpack(main_pid)
-            
-            # Phase 4: Child process detection
-            if self.monitor_children.get() and not self.stop_monitoring.is_set():
-                self.progress_widget.set_phase("🔍 Detecting child processes", "Waiting for spawned processes...")
-                self.progress_widget.set_progress(40)
-                
-                self._wait_for_child_processes(main_pid)
-            
-            # Phase 5: Script extraction
-            if not self.stop_monitoring.is_set():
-                self.progress_widget.set_phase("📜 Extracting scripts", "Processing all detected processes...")
-                self.progress_widget.set_progress(60)
-                
-                # Check if we have any active processes to analyze
-                active_pids = get_active_pids(self.monitored_pids)
-                if not active_pids:
-                    error_msg = "No active processes available for analysis"
-                    self.log_widget.log(error_msg, 'error')
-                    if total_scripts == 0:  # Only raise error if no scripts found via resources
-                        raise Exception(error_msg)
-                else:
-                    memory_scripts = self._extract_from_all_processes(main_pid)
-                    total_scripts += memory_scripts
-                    self.log_widget.log(f"Memory extraction: {memory_scripts} script(s) found", 'info')
-            
-            # Phase 6: Cleanup
-            self.progress_widget.set_phase("🧹 Cleanup", "Terminating processes...")
-            self.progress_widget.set_progress(90)
-            
-            self._terminate_all_monitored_processes()
-            
-            # Phase 7: Complete
-            self.progress_widget.set_phase("✅ Complete", f"Extracted {total_scripts} script(s)")
-            self.progress_widget.set_progress(100)
-            
-            self._show_final_results(total_scripts, main_process_terminated, main_process_unpacked)
-            
-        except Exception as e:
-            self.log_widget.log(f"Error during extraction: {str(e)}", 'error')
-            self.progress_widget.set_phase("❌ Error", str(e))
-            messagebox.showerror("Extraction Error", f"An error occurred during extraction:\n{str(e)}")
-            
-        finally:
-            self.stop_monitoring.set()
-            if monitor_thread:
-                monitor_thread.join(timeout=5)
-            
-            # Ensure all processes are terminated even if there was an error
-            try:
-                self._terminate_all_monitored_processes()
-            except Exception as e:
-                self.log_widget.log(f"Error during final cleanup: {str(e)}", 'warning')
-            
-            # Reset UI state - ensure buttons are properly reset regardless of how process ended
-            self.root.after(0, self._reset_ui_state)
-    
-    def _handle_main_process_unpack(self, main_pid):
-        """Handle main process unpacking with progress updates."""
-        main_process_unpacked = False
-        main_process_terminated = False
-        
-        if get_process_info(main_pid)['exists']:
-            self.log_widget.log("Waiting for main process to unpack...", 'info')
-            main_process_unpacked = wait_for_unpack(main_pid)
-            
-            if not main_process_unpacked:
-                if get_process_info(main_pid)['exists']:
-                    self.log_widget.log("Main process unpack timeout, continuing...", 'warning')
-                else:
-                    main_process_terminated = True
-                    self.log_widget.log("Main process terminated during unpack", 'warning')
-            else:
-                self.log_widget.log("Main process unpacked successfully", 'success')
-        else:
-            main_process_terminated = True
-            self.log_widget.log("Main process terminated early", 'warning')
-            
-        return main_process_unpacked, main_process_terminated
-    
-    def _wait_for_child_processes(self, main_pid):
-        """Wait for child processes with progress updates."""
-        self.log_widget.log("Monitoring for child processes...", 'info')
-        
-        # Wait longer for subprocesses to appear and stabilize
-        wait_cycles = 15  # Increased from 5 to 15 (30 seconds total)
-        main_process_died_at_cycle = None
-        
-        for i in range(wait_cycles):
-            if self.stop_monitoring.is_set():
-                break
-            
-            # Check if main process is still alive
-            main_process_info = get_process_info(main_pid)
-            if not main_process_info['exists']:
-                if main_process_died_at_cycle is None:
-                    main_process_died_at_cycle = i
-                    self.log_widget.log("Main process terminated - continuing to monitor for child processes...", 'warning')
-                
-                # Check how long since main process died
-                cycles_since_death = i - main_process_died_at_cycle
-                
-                # Give more time for child processes to appear after main process death
-                if cycles_since_death >= 5:  # 10 seconds after main process death
-                    active_children = [pid for pid in self.monitored_pids if pid != main_pid and get_process_info(pid)['exists']]
-                    
-                    if not active_children:
-                        # Check if we ever had child processes
-                        total_detected = len(self.monitored_pids) - 1  # Subtract main process
-                        if total_detected == 0:
-                            self.log_widget.log("Main process terminated and no child processes found after waiting - stopping monitoring", 'error')
-                            self.stop_monitoring.set()
-                            raise Exception("Main process terminated without spawning child processes")
-                        else:
-                            # Had child processes but they all died
-                            self.log_widget.log("Main process and all child processes terminated - stopping monitoring", 'warning')
-                            break
-                    else:
-                        self.log_widget.log(f"Main process terminated but {len(active_children)} child process(es) still running - continuing...", 'info')
-                
-            current_count = len(self.monitored_pids)
-            
-            # Log progress every few cycles
-            if i % 3 == 0:
-                elapsed = (i + 1) * 2
-                main_status = "terminated" if main_process_died_at_cycle is not None else "running"
-                self.log_widget.log(f"Waiting for child processes... ({elapsed}s elapsed, {current_count-1} processes detected, main: {main_status})", 'info')
-            
-            time.sleep(2)  # Check every 2 seconds
-            self.update_process_list()
-            
-            # If we detected new processes in the last few cycles, wait a bit more
-            if i >= 10:  # After 20 seconds
-                recent_count = len(self.monitored_pids)
-                if recent_count > current_count:
-                    self.log_widget.log("New processes detected, extending monitoring time...", 'info')
-                    wait_cycles = min(wait_cycles + 3, 25)  # Extend but cap at 50 seconds total
-        
-        final_count = len(self.monitored_pids)
-        if final_count > 1:  # More than just the main process
-            active_children = [pid for pid in self.monitored_pids if pid != main_pid and get_process_info(pid)['exists']]
-            self.log_widget.log(f"Child process detection complete. Found {len(active_children)} active child process(es)", 'success')
-        else:
-            self.log_widget.log("No child processes detected", 'info')
-    
-    def _extract_from_all_processes(self, main_pid):
-        """Extract scripts with detailed progress tracking."""
-        active_pids = get_active_pids(self.monitored_pids)
-        
-        if not active_pids:
-            self.log_widget.log("No active processes found to analyze", 'warning')
-            return 0
-        
-        self.log_widget.log(f"Processing {len(active_pids)} processes simultaneously...", 'info')
-        
-        total_scripts = 0
-        
-        # Use ThreadPoolExecutor with progress tracking
-        max_workers = min(len(active_pids), MAX_WORKER_THREADS)
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            # Submit all tasks
-            future_to_pid = {
-                executor.submit(process_single_pid, pid, pid == main_pid): pid 
-                for pid in active_pids
-            }
-            
-            # Track progress
-            completed = 0
-            for future in as_completed(future_to_pid):
-                if self.stop_monitoring.is_set():
-                    break
-                    
-                result = future.result()
-                pid = result['pid']
-                total_scripts += result['scripts_count']
-                
-                completed += 1
-                progress = 60 + (completed / len(active_pids)) * 25  # 60-85% range
-                self.progress_widget.set_progress(progress)
-                
-                # Log result
-                if result['scripts_count'] > 0:
-                    self.log_widget.log(f"PID {pid}: Extracted {result['scripts_count']} script(s)", 'success')
-                else:
-                    status_msg = result['status'].replace('_', ' ').title()
-                    self.log_widget.log(f"PID {pid}: {status_msg}", 'warning')
-                
-                # Update process status
-                self.process_widget.set_process_status(pid, result['status'])
-        
-        return total_scripts
-    
-    def _terminate_all_monitored_processes(self):
-        """Terminate all monitored processes (main + children)."""
-        active_pids = get_active_pids(self.monitored_pids)
-        
-        if not active_pids:
-            self.log_widget.log("No active processes to terminate", 'info')
+            mode = (
+                "static"
+                if self.mode.get().startswith("Static")
+                else "auto"
+                if self.mode.get().startswith("Auto")
+                else "memory"
+            )
+            config = ExtractionConfig(
+                Path(self.exe),
+                Path(self.output_path.get()),
+                mode=mode,
+                allow_execution=mode != "static",
+                timeout=float(self.timeout.get()),
+                monitor_children=self.monitor_children.get(),
+                extract_resources=self.extract_resources.get(),
+            )
+        except ValueError as exc:
+            messagebox.showerror("Invalid configuration", str(exc))
             return
-        
-        self.log_widget.log(f"Terminating {len(active_pids)} process(es)...", 'info')
-        
-        terminated_count = 0
-        for pid in active_pids:
+        # Snapshot every Tk variable before launching the worker.
+        self._auto_open = self.auto_open.get()
+        self._generation += 1
+        generation = self._generation
+        self._cancel = threading.Event()
+        self._result = None
+        self._processes.clear()
+        self.process_widget.clear()
+        self.log_widget.clear()
+        self.progress_widget.reset()
+        self.run_button.config(state="disabled")
+        self.browse_button.config(state="disabled")
+        self.stop_button.config(state="normal")
+        self.open_folder_button.config(state="disabled")
+
+        def work():
             try:
-                process_info = get_process_info(pid)
-                if process_info['exists']:
-                    success = terminate_process_safely(pid)
-                    if success:
-                        terminated_count += 1
-                        self.log_widget.log(f"Terminated process {pid} ({process_info['name']})", 'success')
-                    else:
-                        self.log_widget.log(f"Failed to terminate process {pid} ({process_info['name']})", 'warning')
-                else:
-                    self.log_widget.log(f"Process {pid} already terminated", 'info')
-            except Exception as e:
-                self.log_widget.log(f"Error terminating process {pid}: {str(e)}", 'warning')
-        
-        self.log_widget.log(f"Process cleanup complete: {terminated_count}/{len(active_pids)} processes terminated", 'info')
-    
-    def _show_final_results(self, total_scripts, main_process_terminated, main_process_unpacked):
-        """Show final results with detailed logging."""
-        active_processes = len(get_active_pids(self.monitored_pids))
-        
-        self.log_widget.log("=" * 50, 'info')
-        self.log_widget.log("EXTRACTION COMPLETE", 'success')
-        self.log_widget.log("=" * 50, 'info')
-        self.log_widget.log(f"Total scripts extracted: {total_scripts}", 'success')
-        self.log_widget.log(f"Processes analyzed: {active_processes}", 'info')
-        
-        # Show breakdown if resources were also extracted
-        if self.extract_resources.get():
-            self.log_widget.log("Scripts found from: RCDATA resources + process memory", 'info')
-        
-        if main_process_terminated:
-            self.log_widget.log("Note: Main process terminated early", 'warning')
-        elif not main_process_unpacked:
-            self.log_widget.log("Warning: Main process unpack timeout", 'warning')
-        
-        if total_scripts > 0:
-            self.open_folder_button.config(state='normal')
-            self.log_widget.log(f"Scripts saved to: {DEFAULT_OUTPUT_DIR}/", 'success')
-            
-            if self.auto_open.get():
-                from .utils import open_output_folder
-                open_output_folder()
-        else:
-            self.log_widget.log("No scripts found. Try running as administrator or verify the executable contains AHK scripts.", 'warning')
-        
-        # Show completion message
-        show_completion_message(total_scripts) 
+                result = ExtractionEngine().run(
+                    config, self._cancel, lambda event: self._events.put(("event", generation, event))
+                )
+                self._events.put(("result", generation, result))
+            except Exception as exc:
+                self._events.put(("failure", generation, str(exc)))
+
+        self._worker = threading.Thread(target=work, daemon=False, name=f"ahk-session-{generation}")
+        self._worker.start()
+
+    def stop_extraction(self):
+        if self.running and self._cancel:
+            self._cancel.set()
+            self.stop_button.config(state="disabled")
+            self.progress_widget.set_phase("Cancelling", "Waiting for workers and process cleanup...")
+
+    def _drain(self):
+        for _ in range(200):
+            try:
+                kind, generation, payload = self._events.get_nowait()
+            except queue.Empty:
+                break
+            if kind == "analysis":
+                if generation == self._analysis_generation:
+                    self.pe_analysis_widget.show_analysis(payload)
+                continue
+            if generation != self._generation:
+                continue
+            if kind == "event":
+                self._show_event(payload)
+            elif kind == "result":
+                self._result = payload
+                self._show_result(payload)
+            elif kind == "failure":
+                self.log_widget.log(payload, "error")
+                self.progress_widget.set_phase("Error", payload)
+        if self._worker is not None and not self._worker.is_alive():
+            self._worker.join()
+            self._worker = None
+            self.run_button.config(state="normal" if self.exe else "disabled")
+            self.browse_button.config(state="normal")
+            self.stop_button.config(state="disabled")
+        if self._closing and not self.running:
+            self.root.destroy()
+            return
+        self.root.after(50, self._drain)
+
+    def _show_event(self, event):
+        kind = event["kind"]
+        if kind == "phase":
+            self.progress_widget.set_phase(event["message"])
+            self.progress_widget.set_progress(event.get("progress", 0))
+            if event.get("indeterminate"):
+                self.progress_widget.set_indeterminate()
+        elif kind == "process":
+            pid = event["pid"]
+            self._processes[pid] = (event.get("name", ""), event["status"])
+            self.process_widget.show_snapshots(self._processes)
+        if kind != "finished":
+            self.log_widget.log(event["message"], "info")
+
+    def _show_result(self, result):
+        success = result.status == Status.SUCCESS
+        label = str(result.status).replace("_", " ").title()
+        self.progress_widget.set_phase(
+            label, f"{len(result.artifacts)} script(s); {len(result.processes)} process(es) analyzed"
+        )
+        self.progress_widget.set_progress(100 if success else 0)
+        self.log_widget.log(
+            f"{label}: {len(result.artifacts)} artifact(s)", "success" if success else "warning"
+        )
+        for diagnostic in result.diagnostics:
+            self.log_widget.log(
+                diagnostic["message"], "error" if result.status == Status.ERROR else "warning"
+            )
+        for process in result.processes:
+            for diagnostic in process["diagnostics"]:
+                self.log_widget.log(f"PID {process['pid']}: {diagnostic['message']}", "warning")
+        if result.output_dir:
+            self.open_folder_button.config(state="normal")
+            self.log_widget.log(f"Diagnostics and source: {result.output_dir}", "info")
+            if self._auto_open and result.artifacts:
+                self.open_output()
+
+    def open_output(self):
+        if self._result and self._result.output_dir:
+            open_file_in_default_app(self._result.output_dir)
+
+    def export_diagnostics(self):
+        if self.running:
+            return
+        if not self._result:
+            messagebox.showinfo("Diagnostic export", "Complete an extraction first.")
+            return
+        path = filedialog.asksaveasfilename(defaultextension=".json", filetypes=[("JSON", "*.json")])
+        if path:
+            try:
+                manifest = Path(self._result.output_dir) / "manifest.json"
+                content = (
+                    manifest.read_bytes()
+                    if manifest.is_file()
+                    else json.dumps(self._result.as_dict(), indent=2).encode()
+                )
+                Path(path).write_bytes(content)
+            except OSError as exc:
+                messagebox.showerror("Export failed", str(exc))
+
+    def clear_log(self):
+        self.log_widget.clear()
+
+    def close(self):
+        self._closing = True
+        self.stop_extraction()
+        if not self.running:
+            self.root.destroy()

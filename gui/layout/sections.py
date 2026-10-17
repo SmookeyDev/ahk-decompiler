@@ -2,7 +2,6 @@
 GUI section setup functions for the AHK Decompiler.
 """
 
-import tkinter as tk
 from tkinter import ttk
 
 from ..components import ModernProgressBar, PEAnalysisWidget, LogWidget, ProcessListWidget
@@ -13,86 +12,106 @@ from ..utils.file_operations import open_output_folder
 def setup_header_section(parent):
     """Setup header section with title and subtitle."""
     fonts = get_font_config()
-    
+
     header_frame = ttk.Frame(parent)
-    header_frame.pack(fill='x', pady=(0, 20))
-    
+    header_frame.pack(fill="x", pady=(0, 20))
+
     # Title
     title_label = ttk.Label(
-        header_frame, 
-        text="AutoHotkey Script Decompiler",
-        font=fonts['title'],
-        foreground='#2c3e50'
+        header_frame, text="AutoHotkey Script Decompiler", font=fonts["title"], foreground="#2c3e50"
     )
     title_label.pack()
-    
+
     # Subtitle
     subtitle_label = ttk.Label(
-        header_frame, 
+        header_frame,
         text="Extract AHK scripts from compiled executables",
-        font=fonts['subtitle'],
-        foreground='#7f8c8d'
+        font=fonts["subtitle"],
+        foreground="#7f8c8d",
     )
     subtitle_label.pack()
-    
+
     # Separator
-    ttk.Separator(header_frame, orient='horizontal').pack(fill='x', pady=(10, 0))
-    
+    ttk.Separator(header_frame, orient="horizontal").pack(fill="x", pady=(10, 0))
+
     return header_frame
 
 
-def setup_config_section(parent, file_path_var, browse_callback, monitor_children, extract_resources, auto_open):
+def setup_config_section(
+    parent,
+    file_path_var,
+    browse_callback,
+    monitor_children,
+    extract_resources,
+    auto_open,
+    mode=None,
+    output_path=None,
+    output_callback=None,
+    timeout=None,
+):
     """Setup configuration section with file selection and options."""
     config_frame = ttk.LabelFrame(parent, text="Configuration", padding=10)
-    config_frame.pack(fill='x', pady=(0, 10))
-    
+    config_frame.pack(fill="x", pady=(0, 10))
+
     # File selection
     file_frame = ttk.Frame(config_frame)
-    file_frame.pack(fill='x', pady=(0, 10))
-    
-    ttk.Label(file_frame, text="Target Executable:").pack(anchor='w')
-    
+    file_frame.pack(fill="x", pady=(0, 10))
+
+    ttk.Label(file_frame, text="Target Executable:").pack(anchor="w")
+
     file_select_frame = ttk.Frame(file_frame)
-    file_select_frame.pack(fill='x', pady=(5, 0))
-    
+    file_select_frame.pack(fill="x", pady=(5, 0))
+
     file_entry = ttk.Entry(
-        file_select_frame, 
-        textvariable=file_path_var,
-        state='readonly',
-        font=('Segoe UI', 9)
+        file_select_frame, textvariable=file_path_var, state="readonly", font=("Segoe UI", 9)
     )
-    file_entry.pack(side='left', fill='x', expand=True, padx=(0, 10))
-    
+    file_entry.pack(side="left", fill="x", expand=True, padx=(0, 10))
+
     browse_button = ttk.Button(
-        file_select_frame,
-        text="Browse...",
-        command=browse_callback,
-        style='Secondary.TButton'
+        file_select_frame, text="Browse...", command=browse_callback, style="Secondary.TButton"
     )
-    browse_button.pack(side='right')
-    
+    browse_button.pack(side="right")
+
     # Options
     options_frame = ttk.Frame(config_frame)
-    options_frame.pack(fill='x')
-    
+    options_frame.pack(fill="x")
+
+    if mode is not None:
+        ttk.Label(options_frame, text="Extraction mode:").pack(anchor="w")
+        ttk.Combobox(
+            options_frame,
+            textvariable=mode,
+            state="readonly",
+            values=(
+                "Static resources (does not run target)",
+                "Auto (allow target execution if needed)",
+                "Memory (runs target)",
+            ),
+        ).pack(fill="x", pady=(2, 8))
+    if timeout is not None:
+        limits_frame = ttk.Frame(options_frame)
+        limits_frame.pack(fill="x", pady=(0, 8))
+        ttk.Label(limits_frame, text="Runtime timeout (seconds):").pack(side="left")
+        ttk.Spinbox(limits_frame, from_=1, to=600, textvariable=timeout, width=7).pack(side="left", padx=8)
+    if output_path is not None:
+        ttk.Label(options_frame, text="Output directory:").pack(anchor="w")
+        destination = ttk.Frame(options_frame)
+        destination.pack(fill="x", pady=(2, 8))
+        ttk.Entry(destination, textvariable=output_path).pack(side="left", fill="x", expand=True)
+        ttk.Button(destination, text="Browse...", command=output_callback).pack(side="right", padx=(8, 0))
+
     ttk.Checkbutton(
-        options_frame,
-        text="Monitor child processes (recommended)",
-        variable=monitor_children
-    ).pack(anchor='w')
-    
-    ttk.Checkbutton(
-        options_frame,
-        text="Extract from RCDATA resources (for some packed executables)",
-        variable=extract_resources
-    ).pack(anchor='w')
-    
-    ttk.Checkbutton(
-        options_frame,
-        text="Auto-open output folder when complete",
-        variable=auto_open
-    ).pack(anchor='w')
-    
+        options_frame, text="Monitor child processes during memory extraction", variable=monitor_children
+    ).pack(anchor="w")
+
+    ttk.Checkbutton(options_frame, text="Extract embedded RCDATA resources", variable=extract_resources).pack(
+        anchor="w"
+    )
+
+    ttk.Checkbutton(options_frame, text="Auto-open output folder when complete", variable=auto_open).pack(
+        anchor="w"
+    )
+
     return config_frame, file_entry, browse_button
 
 
@@ -119,49 +138,42 @@ def setup_log_section(parent):
 def setup_action_section(parent, start_callback, stop_callback, clear_log_callback):
     """Setup action buttons section."""
     action_frame = ttk.Frame(parent)
-    action_frame.pack(fill='x', pady=(10, 0))
-    
+    action_frame.pack(fill="x", pady=(10, 0))
+
     # Left side buttons
     left_frame = ttk.Frame(action_frame)
-    left_frame.pack(side='left')
-    
+    left_frame.pack(side="left")
+
     run_button = ttk.Button(
         left_frame,
         text="🚀 Start Extraction",
         command=start_callback,
-        state='disabled',
-        style='Primary.TButton'
+        state="disabled",
+        style="Primary.TButton",
     )
-    run_button.pack(side='left', padx=(0, 10))
-    
+    run_button.pack(side="left", padx=(0, 10))
+
     stop_button = ttk.Button(
-        left_frame,
-        text="⏹ Stop",
-        command=stop_callback,
-        state='disabled',
-        style='Secondary.TButton'
+        left_frame, text="⏹ Stop", command=stop_callback, state="disabled", style="Secondary.TButton"
     )
-    stop_button.pack(side='left', padx=(0, 10))
-    
+    stop_button.pack(side="left", padx=(0, 10))
+
     # Right side buttons
     right_frame = ttk.Frame(action_frame)
-    right_frame.pack(side='right')
-    
+    right_frame.pack(side="right")
+
     clear_log_button = ttk.Button(
-        right_frame,
-        text="Clear Log",
-        command=clear_log_callback,
-        style='Secondary.TButton'
+        right_frame, text="Clear Log", command=clear_log_callback, style="Secondary.TButton"
     )
-    clear_log_button.pack(side='left', padx=(0, 10))
-    
+    clear_log_button.pack(side="left", padx=(0, 10))
+
     open_folder_button = ttk.Button(
         right_frame,
         text="📁 Open Output Folder",
         command=open_output_folder,
-        state='disabled',
-        style='Secondary.TButton'
+        state="disabled",
+        style="Secondary.TButton",
     )
-    open_folder_button.pack(side='left')
-    
-    return action_frame, run_button, stop_button, clear_log_button, open_folder_button 
+    open_folder_button.pack(side="left")
+
+    return action_frame, run_button, stop_button, clear_log_button, open_folder_button

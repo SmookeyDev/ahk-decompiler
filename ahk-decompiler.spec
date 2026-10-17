@@ -1,63 +1,21 @@
-block_cipher = None
+# PyInstaller 6.x: separate GUI and console entry points, both in one-file mode.
+import sys
+from PyInstaller.utils.hooks import collect_submodules
 
-a = Analysis(
-    ['main.py'],
-    pathex=[],
-    binaries=[],
-    datas=[],
-    hiddenimports=[
-        'tkinter',
-        'tkinter.ttk',
-        'tkinter.messagebox',
-        'tkinter.filedialog',
-        'psutil',
-        'win32api',
-        'win32con',
-        'win32process',
-        'win32security',
-        'pywintypes',
-        'threading',
-        'concurrent.futures',
-        'queue',
-        'datetime',
-        'os',
-        'sys',
-        'struct',
-        'ctypes',
-        'ctypes.wintypes',
-    ],
-    hookspath=[],
-    hooksconfig={},
-    runtime_hooks=[],
-    excludes=[],
-    win_no_prefer_redirects=False,
-    win_private_assemblies=False,
-    cipher=block_cipher,
-    noarchive=False,
-)
+version_file = 'version_info.txt' if sys.platform == 'win32' else None
 
-pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
+gui = Analysis(['main.py'], pathex=[], binaries=[], datas=[],
+               hiddenimports=collect_submodules('core'), hookspath=[],
+               hooksconfig={}, runtime_hooks=[], excludes=[], noarchive=False)
+gui_pyz = PYZ(gui.pure)
+gui_exe = EXE(gui_pyz, gui.scripts, gui.binaries, gui.datas, [],
+              name='ahk-decompiler', console=False, debug=False, strip=False,
+              upx=False, version=version_file)
 
-exe = EXE(
-    pyz,
-    a.scripts,
-    a.binaries,
-    a.zipfiles,
-    a.datas,
-    [],
-    name='ahk-decompiler',
-    debug=False,
-    bootloader_ignore_signals=False,
-    strip=False,
-    upx=True,
-    upx_exclude=[],
-    runtime_tmpdir=None,
-    console=False,
-    disable_windowed_traceback=False,
-    argv_emulation=False,
-    target_arch=None,
-    codesign_identity=None,
-    entitlements_file=None,
-    version='version_info.txt',
-    icon=None
-) 
+cli = Analysis(['cli.py'], pathex=[], binaries=[], datas=[],
+               hiddenimports=collect_submodules('core'), hookspath=[],
+               hooksconfig={}, runtime_hooks=[], excludes=[], noarchive=False)
+cli_pyz = PYZ(cli.pure)
+cli_exe = EXE(cli_pyz, cli.scripts, cli.binaries, cli.datas, [],
+              name='ahk-decompiler-cli', console=True, debug=False, strip=False,
+              upx=False, version=version_file)

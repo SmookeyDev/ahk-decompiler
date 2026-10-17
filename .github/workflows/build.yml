@@ -1,86 +1,93 @@
-name: Build AHK Decompiler
+name: Test and build AHK Decompiler
 
 on:
   push:
-    branches: [ main, master ]
-    tags: [ 'v*' ]
+    branches: [main, master]
+    tags: ['v*']
   pull_request:
-    branches: [ main, master ]
+    branches: [main, master]
   workflow_dispatch:
 
 permissions:
-  contents: write
-  actions: read
+  contents: read
 
 jobs:
-  build:
-    runs-on: windows-latest
-    
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python: ['3.13', '3.14']
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-      with:
-        fetch-depth: 0
-      
-    - name: Set up Python
-      uses: actions/setup-python@v4
-      with:
-        python-version: '3.13'
-        
-    - name: Cache pip dependencies
-      uses: actions/cache@v3
-      with:
-        path: ~\AppData\Local\pip\Cache
-        key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
-        restore-keys: |
-          ${{ runner.os }}-pip-
-          
-    - name: Install dependencies
-      run: |
-        python -m pip install --upgrade pip
-        pip install -r requirements.txt
-        pip install pyinstaller
-        
-    - name: Verify project structure
-      run: |
-        echo "Checking project structure..."
-        if (Test-Path "main.py") { Write-Host "✅ main.py found" } else { Write-Host "❌ main.py missing"; exit 1 }
-        if (Test-Path "ahk-decompiler.spec") { Write-Host "✅ ahk-decompiler.spec found" } else { Write-Host "❌ ahk-decompiler.spec missing"; exit 1 }
-        if (Test-Path "version_info.txt") { Write-Host "✅ version_info.txt found" } else { Write-Host "❌ version_info.txt missing"; exit 1 }
-        if (Test-Path "gui") { Write-Host "✅ gui directory found" } else { Write-Host "❌ gui directory missing"; exit 1 }
-        if (Test-Path "core") { Write-Host "✅ core directory found" } else { Write-Host "❌ core directory missing"; exit 1 }
-        if (Test-Path "utils") { Write-Host "✅ utils directory found" } else { Write-Host "❌ utils directory missing"; exit 1 }
-      shell: powershell
-        
-    - name: Build executable
-      run: |
-        pyinstaller ahk-decompiler.spec
-      shell: cmd
-      
-    - name: Test executable
-      run: |
-        if (Test-Path "dist/ahk-decompiler.exe") {
-          Write-Host "✅ Executable built successfully"
-          Get-Item "dist/ahk-decompiler.exe" | Select-Object Name, Length, LastWriteTime
-        } else {
-          Write-Host "❌ Executable not found"
-          exit 1
-        }
-      shell: powershell
-      
-    - name: Upload artifact
-      uses: actions/upload-artifact@v4.3.1
-      with:
-        name: ahk-decompiler-windows
-        path: dist/ahk-decompiler.exe
-      
-    - name: Create Release
-      if: startsWith(github.ref, 'refs/tags/')
-      uses: softprops/action-gh-release@v2
-      with:
-        files: dist/ahk-decompiler.exe
-        draft: false
-        prerelease: false
-        generate_release_notes: true
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} 
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ matrix.python }}
+          architecture: x64
+          cache: pip
+          cache-dependency-path: requirements-*.lock
+      - run: python -m pip install --require-hashes -r requirements-dev.lock
+      - name: Lint changed application modules
+        run: python -m ruff check core cli.py main.py scripts tests utils/pe_analyzer.py gui/main_window.py gui/layout/sections.py gui/components
+      - name: Prepare owned AHK v1/v2 x86/x64 and UPX fixtures
+        if: runner.os == 'Windows' && matrix.python == '3.13'
+        shell: pwsh
+        run: |
+          python scripts/prepare_fixtures.py --with-mpress
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          "AHK_FIXTURES=$env:GITHUB_WORKSPACE\.fixtures" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - run: python -m pytest -q --basetemp=.pytest-work
+      - name: Upload fixture diagnostics
+        if: failure() && runner.os == 'Windows'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: diagnostics-${{ matrix.os }}-${{ matrix.python }}
+          path: |
+            .fixtures/fixtures.json
+            .pytest-work/**/manifest.json
+            .pytest-work/**/events.jsonl
+
+  build:
+    needs: test
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.13'
+          architecture: x64
+          cache: pip
+          cache-dependency-path: requirements-build.lock
+      - run: python -m pip install --require-hashes -r requirements-build.lock
+      - run: python -m PyInstaller --noconfirm ahk-decompiler.spec
+      - name: Verify packaged CLI end to end
+        run: python scripts/smoke_packaged.py dist/ahk-decompiler-cli.exe
+      - name: Verify packaged Tk startup
+        shell: pwsh
+        run: |
+          $process = Start-Process -FilePath dist/ahk-decompiler.exe -ArgumentList '--gui-smoke' -PassThru -Wait
+          if ($process.ExitCode -ne 0) { throw "Packaged GUI failed: $($process.ExitCode)" }
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ahk-decompiler-windows
+          path: dist/*.exe
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download validated build artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" --name ahk-decompiler-windows --dir dist
+      - name: Publish tagged release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: gh release create "$RELEASE_TAG" dist/*.exe --repo "$GITHUB_REPOSITORY" --verify-tag --generate-notes

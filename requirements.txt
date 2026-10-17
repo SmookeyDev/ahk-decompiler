@@ -1,2 +1,2 @@
-psutil>=7.0.0
-pywin32>=310
+psutil==7.2.2
+pefile==2024.8.26
