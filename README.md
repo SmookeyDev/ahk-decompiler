@@ -1,307 +1,210 @@
-<p align="center">
-  <h1 align="center">AHK Decompiler</h1>
-  <p align="center">🔍 Extract and recover AutoHotkey scripts from compiled executables.</p>
-  <p align="center">
-    <img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License">
-    <img src="https://img.shields.io/badge/python-3.13+-blue.svg" alt="Python">
-    <img src="https://img.shields.io/badge/platform-Windows-lightgrey.svg" alt="Platform">
-    <img src="https://img.shields.io/badge/status-Active-green.svg" alt="Status">
-  </p>
-</p>
+# AHK Decompiler
 
----
+Recover AutoHotkey source retained in PE resources or process memory. Python
+3.13+, MIT license. Static analysis is portable; process memory extraction and
+the distributed executables require Windows.
 
-## 📝 Table of Contents
+## Recovery strategies
 
-- [🧐 About](#-about)
-- [⚡ Features](#-features)
-- [💻 Installation](#-installation)
-- [🚀 How to Use](#-how-to-use)
-- [📁 Project Structure](#-project-structure)
-- [🔧 Technical Details](#-technical-details)
-- [🔒 Security Considerations](#-security-considerations)
-- [🎯 Supported Formats](#-supported-formats)
-- [💬 Support](#-support)
+The engine first reads RCDATA resources without executing the target. Resource
+names, languages, declared lengths and directories in sections with any name are
+supported. Virtual-only data is reported as `runtime_required` instead of an
+absent script.
 
-## 🧐 About
+Runtime extraction prioritizes resources in the expanded process image, then
+scans readable memory. All paths share UTF-8, UTF-16 LE/BE and legacy decoding,
+including scripts without hotkeys. Original whitespace is preserved. Recovery
+depends on source still being present; recognizing a packer does not imply that
+every executable protected by it can be recovered.
 
-This repository contains an AutoHotkey (AHK) Decompiler/Dumper developed by SmookeyDev. The tool allows you to extract and recover AutoHotkey scripts from compiled executables by analyzing process memory and identifying script patterns.
+## Install and run
 
-## ⚡ Features
+Download `ahk-decompiler.exe` (GUI) and `ahk-decompiler-cli.exe` (console) from
+[Releases](https://github.com/SmookeyDev/ahk-decompiler/releases). Updated binaries
+become available only after a validated tagged release.
 
-| Feature                     | Status | Description                                          |
-| --------------------------- | ------ | ---------------------------------------------------- |
-| Script Extraction           | ✅     | Extracts AHK scripts from compiled executables       |
-| Memory Analysis             | ✅     | Scans process memory for script patterns             |
-| Resource Extraction         | ✅     | Extracts scripts from RCDATA resources in PE files   |
-| Auto Unpack Detection       | ✅     | Waits for packed executables to unpack               |
-| GUI Interface               | ✅     | User-friendly graphical interface                    |
-| Multi-Process Support       | ✅     | Monitors and extracts from child processes           |
-| Multi-Script Support        | ✅     | Extracts multiple scripts from single executable     |
-| Progress Tracking           | ✅     | Real-time progress indicator                         |
-| Parallel Processing         | ✅     | Concurrent script extraction from multiple processes |
-| Activity Logging            | ✅     | Timestamped logs with color coding                   |
-| Process Monitoring          | ✅     | Enhanced process list with status tracking           |
-| Enhanced Subprocess Support | ✅     | Advanced detection and extraction for subprocesses   |
+```sh
+python -m venv .venv
+# Activate .venv using your shell's activation command.
+python -m pip install -r requirements.txt
+python main.py
+```
 
-## 💻 Installation
+The GUI needs Tkinter; the CLI does not import it. Windows APIs use typed ctypes
+bindings initialized only when needed, with no pywin32 dependency.
 
-### Option 1: Pre-built Executable (Recommended for most users)
+## GUI modes
 
-1. **Download** the latest `ahk-decompiler.exe` from [Releases](https://github.com/SmookeyDev/ahk-decompiler/releases)
-2. **Run** the executable directly - no installation needed!
-3. **Optional**: Run as administrator for enhanced process access
+| Mode | Behavior |
+| --- | --- |
+| Static resources | Default. Reads the file without starting the target. |
+| Auto | Tries static recovery, then permits target execution if necessary. |
+| Memory | Starts the target and reads its memory. |
 
-### Option 2: From Source
+Select a file, output directory and mode, then start extraction. Choosing Auto
+or Memory authorizes target execution. The decompiler is not a sandbox; use a
+disposable Windows environment for unknown executables.
 
-#### Prerequisites
+Launched processes enter a private Windows Job Object before execution resumes.
+Cleanup terminates that owned tree, including descendants whose parent exited.
+Stop cancels workers and waits for cleanup before enabling a new run. Updates
+arrive through a queue on the UI thread. Zero scripts never means successful
+recovery. The output button opens the current session, including diagnostics.
 
-- **Python 3.13.3+** (recommended)
-- **Windows OS** (required for Windows API access)
-- **Administrator privileges** (may be required for some processes)
+## CLI
 
-#### Quick Setup
+From source use `python main.py`; packaged users use `ahk-decompiler-cli.exe`
+with the same arguments.
 
-1. **Clone the repository:**
+```sh
+python main.py analyze program.exe --report analysis.json
+python main.py extract program.exe --output recovered
+python main.py extract program.exe --mode auto --allow-execution --output recovered
+python main.py extract program.exe --mode memory --allow-execution --no-children
+python main.py attach 1234 --timeout 15 --output recovered
+python main.py extract packed.exe --upx /path/to/upx --upx-sha256 SHA256
+```
 
-   ```bash
-   git clone https://github.com/SmookeyDev/ahk-decompiler.git
-   cd ahk-decompiler
-   ```
-2. **Install dependencies:**
+Static extraction is the default. Attaching reads an existing process and never
+terminates it. `--argument=value` passes an argument to a launched target and
+may be repeated. File detection uses PE contents rather than the extension.
+The optional UPX adapter preserves the input and writes temporary output. The
+application never downloads UPX; select a trusted local binary and optionally
+enforce its digest. Static success skips both the unpacker and target execution.
 
-   ```bash
-   pip install -r requirements.txt
-   ```
-3. **Run the application:**
+JSON goes to UTF-8 stdout; `--verbose` writes progress to stderr. Ctrl+C cancels
+workers and performs cleanup.
 
-   ```bash
-   python main.py
-   ```
+| Control | Default |
+| --- | --- |
+| `--timeout` | 30 seconds for runtime extraction |
+| `--discovery-seconds` | 3 seconds after the latest new process, bounded by the timeout |
+| `--no-children` | Disable discovery and finish when the main scan ends |
+| `--max-scan-mib` | 512 MiB shared read budget across processes and retries |
+| `--max-script-mib` | 16 MiB per candidate, maximum 64 MiB |
+| `--exhaustive` | Continue the memory fallback after finding a complete candidate |
 
-#### Dependencies Overview
+All exact resource ranges are examined. By default, the general memory fallback
+stops after a complete candidate. Discovery and extraction run concurrently;
+processes that exit before discovery may still be missed. Exhaustive mode retains
+the same read and time limits.
 
-The project uses the following Python packages:
+| Result | Exit code | Meaning |
+| --- | --- | --- |
+| `success` | 0 | At least one validated complete candidate was saved. |
+| `error` | 1 | Invalid input, output failure or another reported error. |
+| `not_found` | 2 | No script found within the reported scan scope. |
+| `partial` | 3 | Incomplete candidates or incomplete process results. |
+| `runtime_required` | 4 | A necessary runtime strategy was not enabled. |
+| `access_denied` | 5 | A native permission failure was recorded. |
+| `unsupported` | 6 | Unsupported platform or collector/target architecture. |
+| `timeout` | 7 | Runtime deadline expired. |
+| `cancelled` | 130 | Cancelled; recovered artifacts remain available. |
 
-- **psutil>=7.0.0** - Process and system utilities
-- **pywin32>=310** - Windows API access for memory operations
-- **tkinter** - GUI framework (usually included with Python)
+Argument syntax errors use argparse's exit code 2. A complete candidate means
+its selected resource or string boundary was found. Heuristic memory recovery
+needs inspection and does not prove equivalence to an unavailable original.
 
-All dependencies are automatically installed via `requirements.txt`.
+## Output and diagnosis
 
-## 🚀 How to Use
+Each run creates a unique folder under the selected destination:
 
-### GUI Mode (Recommended)
+```text
+recovered/program_<UTC timestamp>_<run-id>/
+  script_001_<content-id>.ahk
+  <content-id>_<raw-id>.bin
+  manifest.json
+  events.jsonl
+```
 
-1. **Launch the application:**
+Text is saved as UTF-8, preserving whitespace and line endings. Raw variants are
+saved separately. Exact copies are deduplicated while retaining their origins,
+encodings, addresses, resource metadata and process creation times. Truncated
+candidates use `.partial.ahk` names.
 
-   - **Pre-built Executable**: Double-click `ahk-decompiler.exe`
-   - **From Source**: Run `python main.py`
-2. **Configure extraction settings:**
+The manifest includes input/artifact hashes, application version, process results,
+read statistics, limits reached and native errors. Events use UTC timestamps.
+Writes are atomic and previous sessions are never overwritten. Source, raw
+candidates and diagnostic paths may contain sensitive target data. No telemetry
+or automatic uploads are performed.
 
-   - Click "Browse..." to select your compiled AHK executable
-   - Enable "Monitor child processes" for comprehensive extraction
-   - Enable "Extract from RCDATA resources" for packed executables
-   - Enable "Auto-open output folder" for convenience
-3. **Start extraction:**
+## Architecture
 
-   - Click "🚀 Start Extraction" to begin the process
-   - Monitor real-time progress through the multi-phase progress bar
-   - Watch detailed activity logs with timestamps and color coding
-4. **Monitor progress phases:**
+| Module | Responsibility |
+| --- | --- |
+| `core/engine.py`, `models.py` | Sessions, immutable configuration and typed results |
+| `core/detection.py` | Shared lossless decoder and contiguous streaming windows |
+| `core/resources.py` | PE file and mapped runtime resources |
+| `core/winapi.py`, `memory.py` | Typed APIs, architecture checks and bounded reads |
+| `core/processes.py` | Process identities and Windows Job Object ownership |
+| `core/output.py` | Atomic artifacts, deduplication and provenance |
+| `core/unpack.py` | Optional local UPX adapter |
+| `cli.py`, `gui/` | Presentations over the same service |
 
-   - **Phase 0**: 📦 Extracting resources - Analyzing RCDATA resources (if enabled)
-   - **Phase 1**: 🚀 Initializing - Starting target process
-   - **Phase 2**: 👁 Setting up monitoring - Child process detection
-   - **Phase 3**: ⏳ Waiting for unpacking - Memory analysis
-   - **Phase 4**: 🔍 Detecting child processes - Process enumeration
-   - **Phase 5**: 📜 Extracting scripts - Script extraction
-   - **Phase 6**: 🧹 Cleanup - Process termination
-   - **Phase 7**: ✅ Complete - Results summary
-5. **Review results:**
+The distribution targets an x64 collector. CI tests owned x86/x64 AHK v1.1 and
+v2 runtimes. A 32-bit collector rejects wider targets. ARM64 is outside the
+validated distribution matrix. MPRESS recovery uses the expanded process image;
+no general offline MPRESS decompressor is included. Encrypted, virtualized and
+very old AHK formats have no guaranteed recovery strategy.
 
-   - Check the activity log for detailed extraction information
-   - Click "📁 Open Output Folder" to view extracted scripts
-   - Review process status in the monitored processes table
-
-### Advanced Features
-
-- **Stop/Resume**: Use the "⏹ Stop" button to halt extraction at any time
-- **Log Management**: Clear logs with the "Clear Log" button for new sessions
-- **Real-time Monitoring**: Watch process status updates in real-time
-- **Error Handling**: Detailed error messages with troubleshooting suggestions
-
-### Programmatic Usage
-
-The modular structure allows for easy integration into other projects:
+Original convenience imports remain available, including `core.extract_scripts`,
+`core.process_single_pid` and resource extraction. For structured results:
 
 ```python
-from core.extractor import extract_scripts, process_single_pid
-from core.monitor import get_active_pids
-from core.memory import wait_for_unpack
-from core.resources import extract_scripts_from_resources
+from pathlib import Path
+from core.engine import ExtractionEngine
+from core.models import ExtractionConfig
 
-# Extract from a specific PID
-scripts_count = extract_scripts(pid, 'output_directory')
-
-# Extract from RCDATA resources
-resource_scripts = extract_scripts_from_resources('executable.exe', 'output_directory')
-
-# Process with full analysis
-result = process_single_pid(pid, is_main_process=True)
-
-# Wait for process unpacking
-unpacked = wait_for_unpack(pid, timeout=60)
+result = ExtractionEngine().run(ExtractionConfig(Path('program.exe'), Path('recovered')))
+print(result.status, result.artifacts)
 ```
 
-## 📁 Project Structure
+## Development and verification
 
-The project has been organized into a modular structure for better maintainability:
-
-```
-ahk-decompiler/
-├── gui/
-│   ├── __init__.py
-│   └── main_window.py         # GUI interface with modern design
-│
-├── core/
-│   ├── __init__.py
-│   ├── extractor.py           # Script extraction logic
-│   ├── memory.py              # Memory manipulation utilities
-│   ├── monitor.py             # Process monitoring functionality
-│   └── resources.py           # PE resource extraction utilities
-│
-├── utils/
-│   ├── __init__.py
-│   └── constants.py           # Project constants and configuration
-│
-├── dump_scripts/              # Output directory for extracted scripts
-├── main.py                    # Application entry point
-├── requirements.txt           # Python dependencies
-├── README.md                  # Project documentation
-└── .gitignore                # Git ignore file
+```sh
+python -m pip install --require-hashes -r requirements-dev.lock
+python -m pytest -q
+python -m ruff check core cli.py main.py scripts tests utils/pe_analyzer.py gui/main_window.py gui/layout/sections.py gui/components
 ```
 
-### 🏗️ Module Overview
+Portable tests construct their own PE files. Windows tests read a known Unicode
+buffer and exercise owned process lifecycles. GUI tests withdraw their window
+and skip when Tk or a display is unavailable.
 
-#### `gui/` Package
+Generate owned AHK v1/v2 x86/x64, UPX and MPRESS fixtures on Windows:
 
-- **`main_window.py`**: Complete GUI implementation using tkinter
-  - Multi-phase progress tracking with visual feedback
-  - Timestamped, color-coded activity logging
-  - Enhanced process monitoring with TreeView
-  - Modern design with organized sections and styling
-
-#### `core/` Package
-
-- **`memory.py`**: Low-level memory operations
-
-  - Memory region enumeration (`enum_memory`)
-  - Process memory reading (`read_region`)
-  - Process handle management (`open_process`, `close_process`)
-  - Unpacking detection (`wait_for_unpack`)
-- **`extractor.py`**: Core script extraction algorithms
-
-  - Main extraction function (`extract_scripts`)
-  - Single process handling (`process_single_pid`)
-  - Pattern matching for AHK script signatures
-  - UTF-8 decoding and file output
-- **`monitor.py`**: Process monitoring and management
-
-  - Child process detection (`monitor_child_processes`)
-  - Process information retrieval (`get_process_info`)
-  - Safe process termination (`terminate_process_safely`)
-  - Active process filtering (`get_active_pids`)
-- **`resources.py`**: PE resource extraction functionality
-
-  - RCDATA resource extraction (`extract_scripts_from_resources`)
-  - PE file parsing and analysis (`PEResourceExtractor`)
-  - Script detection in resource data
-  - Support for multiple encodings and formats
-
-#### `utils/` Package
-
-- **`constants.py`**: Project-wide constants
-  - Memory protection flags and access rights
-  - Default timeout and configuration values
-  - Script detection patterns and heuristics
-  - GUI settings and dimensions
-
-## 🔧 Technical Details
-
-The decompiler works through several key phases:
-
-### Memory Scanning & Pattern Matching
-
-- **Memory Analysis**: Scans process memory regions for readable content using Windows API (`VirtualQueryEx`, `ReadProcessMemory`)
-- **Pattern Detection**: Searches for "COMPILER" signatures and script boundaries using null byte patterns
-- **Script Validation**: Applies heuristics to validate and extract script content
-
-### Resource Extraction
-
-- **PE Analysis**: Parses PE file structure to locate RCDATA resources
-- **Multi-Encoding Support**: Handles UTF-8, UTF-16, Latin-1, and CP1252 encodings
-- **Pattern Recognition**: Detects AutoHotkey-specific syntax and commands
-- **Detection Patterns**: Identifies AutoHotkey directives (`#NoEnv`, `#SingleInstance`), function calls (`SendInput`, `WinActivate`), and hotkey syntax
-- **Advantages**: Works without executing the target process, ideal for packed executables
-
-### Process Management
-
-- **Lifecycle Handling**: Manages process startup, unpacking detection, and safe termination
-- **Child Process Monitoring**: Tracks and extracts from spawned subprocesses
-- **Parallel Processing**: Uses ThreadPoolExecutor for concurrent extraction
-
-### Memory Permissions
-
-The tool scans memory regions with these permissions:
-
-- `PAGE_READABLE` (0x02): Read access
-- `PAGE_READWRITE` (0x04): Read/Write access
-- `PAGE_EXECUTE_READ` (0x20): Execute/Read access
-- `PAGE_EXECUTE_READWRITE` (0x40): Execute/Read/Write access
-
-## 🔒 Security Considerations
-
-- ⚠️ **Administrator Rights**: May require elevated privileges for some processes
-- 🛡️ **Antivirus Detection**: Some antivirus software may flag memory analysis tools
-- 🔐 **Process Access**: Only works on processes the user has permission to access
-- 📊 **Memory Safety**: Uses safe memory reading with comprehensive error handling
-
-## 🎯 Supported Formats
-
-- ✅ **Standard AutoHotkey compiled executables** (.exe)
-- ✅ **MPRESS packed executables** (with auto-unpack detection)
-- ✅ **Executables with RCDATA resources**
-- ✅ **Multi-script executables**
-- ⚠️ **Encrypted/obfuscated scripts** (limited support)
-
-### Output Structure
-
-Extracted scripts are saved with clear naming conventions:
-
-```
-dump_scripts/
-├── script_[pid]_[number].ahk              # From memory analysis
-├── script_resource_[number].ahk           # From RCDATA resources
-└── script_[pid]_[number]_subprocess.ahk   # From child processes
+```powershell
+python scripts/prepare_fixtures.py --with-mpress
+$env:AHK_FIXTURES = "$PWD\.fixtures"
+python -m pytest -q
 ```
 
+The generator downloads hash-pinned AutoHotkey and UPX upstream releases.
+`--with-mpress` uses the mirror referenced by the official Ahk2Exe updater and
+retains its license in `.test-tools/mpress`. Alternatively pass a local binary
+with `--mpress C:\tools\mpress.exe`. Tools and generated executables stay outside
+Git and application builds. Public CI never executes unknown issue attachments.
 
+Build using a full Windows Python installation with Tk:
 
-## 💬 Support
+```sh
+python -m pip install --require-hashes -r requirements-build.lock
+python -m PyInstaller --noconfirm ahk-decompiler.spec
+python scripts/smoke_packaged.py dist/ahk-decompiler-cli.exe
+```
 
-For more information and support:
+CI runs Python 3.13/3.14 on Linux and Windows, tests the owned runtime matrix on
+Windows 3.13, checks Unicode extraction through the packaged CLI and verifies
+packaged GUI startup. Tagged publication is gated on those jobs and remains a
+separate operation from implementing or reviewing a change.
 
-- 🐛 **Issues**: Create an issue on GitHub
-- 💡 **Feature Requests**: Submit via GitHub issues
-- 📚 **AutoHotkey Documentation**: https://autohotkey.com/docs/
+## Reporting problems
 
-## 📄 License
+Include the application version and exported diagnostic JSON. Useful evidence
+includes the input hash, runtime version if known, collector/target architecture,
+packer, mode and native errors. Review diagnostic paths and metadata before sharing.
 
-This project is licensed under the [MIT License](LICENSE).
-
----
-
-<div align="center">
-  <sub>Developed with ❤️ by SmookeyDev</sub>
-</div>
+[Issue #2](https://github.com/SmookeyDev/ahk-decompiler/issues/2) motivated the
+Unicode, virtual-resource and zero-result regressions. Its attachment must be
+validated separately in a disposable Windows environment before claiming that
+specific executable is recovered.

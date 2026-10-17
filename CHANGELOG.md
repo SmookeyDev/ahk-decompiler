@@ -1,3 +1,18 @@
+## [Unreleased] - 1.1.0
+
+- Add a shared extraction engine and lossless UTF-8/UTF-16/legacy detection,
+  including scripts without hotkeys and source/raw-byte preservation.
+- Parse PE resources with pefile and distinguish virtual-only resource data.
+- Add typed Windows APIs, architecture checks, partial copies, bounded streaming
+  reads, cancellation and restored runtime resource bounds.
+- Add explicit static/auto/memory GUI modes, JSON CLI and attachment support.
+- Own launched trees with Job Objects and queue all worker updates to the GUI.
+- Save atomic artifacts, provenance, manifests and event logs in unique sessions.
+- Fix successful statuses with zero scripts and cancellation/restart races.
+- Add optional local UPX unpacking, dependency locks and owned fixture testing.
+- Build separate GUI/console executables and gate tagged releases on regression,
+  native fixture and packaged smoke tests. This change publishes no release.
+
 ## [v1.0.0] - 2025-01-25
 
 ### 🎉 Initial Release - AHK Decompiler

@@ -1,451 +1,234 @@
-"""
-Resource extraction functionality for AutoHotkey decompilation.
+"""Read PE resources without loading or executing the target image."""
 
-This module provides functionality to extract RCDATA resources from
-executable files, which often contain embedded AHK scripts.
-"""
+from __future__ import annotations
 
-import os
-import re
-import struct
 import logging
-from typing import List, Dict, Optional, Tuple
+import struct
+from dataclasses import dataclass
+from pathlib import Path
 
-# PE file constants
-PE_SIGNATURE = b'PE\x00\x00'
-DOS_HEADER_SIZE = 64
-IMAGE_NT_HEADERS_SIZE = 24
-SECTION_HEADER_SIZE = 40
+import pefile
 
-# Resource directory constants
-RT_RCDATA = 10  # RCDATA resource type
-IMAGE_RESOURCE_DIRECTORY_SIZE = 16
-IMAGE_RESOURCE_DIRECTORY_ENTRY_SIZE = 8
+from .detection import detect_scripts, is_likely_script
+from .output import OutputStore
+
+logger = logging.getLogger(__name__)
+RT_RCDATA = 10
+MAX_RESOURCE_BYTES = 64 * 1024 * 1024
+MAX_FILE_BYTES = 512 * 1024 * 1024
+
+
+@dataclass(frozen=True)
+class ResourceEntry:
+    name: str
+    language: int
+    rva: int
+    size: int
+    codepage: int = 0
+    data: bytes | None = None
+    reason: str = ""
+
+    def metadata(self):
+        return {
+            "name": self.name,
+            "language": self.language,
+            "rva": self.rva,
+            "size": self.size,
+            "codepage": self.codepage,
+            "availability": self.reason or "file",
+        }
+
+
+def file_range(pe: pefile.PE, data: bytes, rva: int, size: int) -> tuple[bytes | None, str]:
+    """VirtualSize never authorizes reading past SizeOfRawData on disk."""
+    if size <= 0 or size > MAX_RESOURCE_BYTES:
+        return None, "invalid_size"
+    if 0 <= rva < pe.OPTIONAL_HEADER.SizeOfHeaders:
+        if rva + size <= min(pe.OPTIONAL_HEADER.SizeOfHeaders, len(data)):
+            return data[rva : rva + size], ""
+        return None, "invalid_range"
+    for section in pe.sections:
+        relative = rva - section.VirtualAddress
+        if 0 <= relative < max(section.Misc_VirtualSize, section.SizeOfRawData):
+            if relative + size > section.SizeOfRawData:
+                return None, "virtual_only"
+            offset = section.PointerToRawData + relative
+            if offset < 0 or offset + size > len(data):
+                return None, "truncated_file"
+            return data[offset : offset + size], ""
+    return None, "unmapped_rva"
 
 
 class PEResourceExtractor:
-    """Extract resources from PE executable files."""
-    
-    def __init__(self, filepath: str):
-        """Initialize the PE resource extractor."""
-        self.filepath = filepath
-        self.file_data = None
-        self.pe_offset = 0
-        self.sections = []
-        self.resource_section = None
-        
+    def __init__(self, filepath: str, max_file_bytes: int = MAX_FILE_BYTES):
+        self.filepath = str(filepath)
+        self.maximum = max_file_bytes
+        self.file_data = b""
+        self.entries: list[ResourceEntry] = []
+        self.diagnostics: list[dict] = []
+
     def load_file(self) -> bool:
-        """Load the PE file into memory."""
+        self.entries.clear()
+        self.diagnostics.clear()
+        pe = None
         try:
-            with open(self.filepath, 'rb') as f:
-                self.file_data = f.read()
-            return self._parse_pe_headers()
-        except Exception as e:
-            logging.error(f"Failed to load file {self.filepath}: {e}")
-            return False
-    
-    def _parse_pe_headers(self) -> bool:
-        """Parse PE headers to locate resource section."""
-        try:
-            # Check DOS header
-            if len(self.file_data) < DOS_HEADER_SIZE:
-                return False
-                
-            if self.file_data[:2] != b'MZ':
-                return False
-                
-            # Get PE offset from DOS header
-            self.pe_offset = struct.unpack('<I', self.file_data[60:64])[0]
-            
-            # Check PE signature
-            if len(self.file_data) < self.pe_offset + 4:
-                return False
-                
-            if self.file_data[self.pe_offset:self.pe_offset + 4] != PE_SIGNATURE:
-                return False
-                
-            # Parse COFF header to get number of sections
-            coff_offset = self.pe_offset + 4
-            if len(self.file_data) < coff_offset + 20:
-                return False
-                
-            num_sections = struct.unpack('<H', self.file_data[coff_offset + 2:coff_offset + 4])[0]
-            optional_header_size = struct.unpack('<H', self.file_data[coff_offset + 16:coff_offset + 18])[0]
-            
-            # Parse sections
-            sections_offset = coff_offset + 20 + optional_header_size
-            for i in range(num_sections):
-                section_offset = sections_offset + (i * SECTION_HEADER_SIZE)
-                if len(self.file_data) < section_offset + SECTION_HEADER_SIZE:
-                    break
-                    
-                section_data = self.file_data[section_offset:section_offset + SECTION_HEADER_SIZE]
-                section_name = section_data[:8].rstrip(b'\x00').decode('ascii', errors='ignore')
-                virtual_size = struct.unpack('<I', section_data[8:12])[0]
-                virtual_address = struct.unpack('<I', section_data[12:16])[0]
-                raw_size = struct.unpack('<I', section_data[16:20])[0]
-                raw_offset = struct.unpack('<I', section_data[20:24])[0]
-                
-                section_info = {
-                    'name': section_name,
-                    'virtual_address': virtual_address,
-                    'virtual_size': virtual_size,
-                    'raw_offset': raw_offset,
-                    'raw_size': raw_size
-                }
-                
-                self.sections.append(section_info)
-                
-                # Check if this is the resource section
-                if section_name == '.rsrc':
-                    self.resource_section = section_info
-                    
+            path = Path(self.filepath)
+            if path.stat().st_size > self.maximum:
+                raise ValueError("Input exceeds the configured file size limit")
+            with path.open("rb") as stream:
+                self.file_data = stream.read(self.maximum + 1)
+            if len(self.file_data) > self.maximum:
+                raise ValueError("Input exceeds the configured file size limit")
+            pe = pefile.PE(data=self.file_data, fast_load=True)
+            pe.parse_data_directories(directories=[pefile.DIRECTORY_ENTRY["IMAGE_DIRECTORY_ENTRY_RESOURCE"]])
+            root = getattr(pe, "DIRECTORY_ENTRY_RESOURCE", None)
+            for resource_type in root.entries if root else []:
+                if resource_type.id != RT_RCDATA or not hasattr(resource_type, "directory"):
+                    continue
+                for resource in resource_type.directory.entries:
+                    name = str(resource.name) if resource.name is not None else str(resource.id)
+                    for language in (
+                        getattr(resource, "directory", ()).entries if hasattr(resource, "directory") else []
+                    ):
+                        if len(self.entries) >= 4096:
+                            raise ValueError("Resource count limit (4096) exceeded")
+                        if not hasattr(language, "data"):
+                            continue
+                        entry = language.data.struct
+                        content, reason = file_range(pe, self.file_data, entry.OffsetToData, entry.Size)
+                        self.entries.append(
+                            ResourceEntry(
+                                name,
+                                language.id or 0,
+                                entry.OffsetToData,
+                                entry.Size,
+                                entry.CodePage,
+                                content,
+                                reason,
+                            )
+                        )
             return True
-            
-        except Exception as e:
-            logging.error(f"Error parsing PE headers: {e}")
+        except (OSError, ValueError, pefile.PEFormatError) as exc:
+            self.diagnostics.append({"stage": "resources", "message": str(exc)})
+            logger.warning("Resource analysis failed: %s", exc)
             return False
-    
-    def extract_rcdata_resources(self) -> List[bytes]:
-        """Extract all RCDATA resources from the executable."""
-        if not self.resource_section:
-            logging.warning("No resource section found")
-            return []
-            
-        try:
-            resources = []
-            rsrc_offset = self.resource_section['raw_offset']
-            rsrc_size = self.resource_section['raw_size']
-            
-            if len(self.file_data) < rsrc_offset + rsrc_size:
-                logging.error("Resource section extends beyond file")
-                return []
-                
-            rsrc_data = self.file_data[rsrc_offset:rsrc_offset + rsrc_size]
-            
-            # Parse resource directory
-            rcdata_resources = self._parse_resource_directory(rsrc_data, rsrc_offset)
-            
-            for resource_rva, size in rcdata_resources:
-                # Convert RVA to file offset
-                file_offset = self._rva_to_file_offset(resource_rva)
-                if file_offset and file_offset + size <= len(self.file_data):
-                    resource_data = self.file_data[file_offset:file_offset + size]
-                    resources.append(resource_data)
-                    
-            return resources
-            
-        except Exception as e:
-            logging.error(f"Error extracting RCDATA resources: {e}")
-            return []
-    
-    def _parse_resource_directory(self, rsrc_data: bytes, rsrc_base_offset: int) -> List[Tuple[int, int]]:
-        """Parse resource directory to find RCDATA entries."""
-        resources = []
-        
-        try:
-            if len(rsrc_data) < IMAGE_RESOURCE_DIRECTORY_SIZE:
-                return resources
-                
-            # Parse root directory
-            num_name_entries = struct.unpack('<H', rsrc_data[12:14])[0]
-            num_id_entries = struct.unpack('<H', rsrc_data[14:16])[0]
-            
-            # Look for RCDATA entries (RT_RCDATA = 10)
-            entry_offset = IMAGE_RESOURCE_DIRECTORY_SIZE
-            
-            for i in range(num_name_entries + num_id_entries):
-                if entry_offset + IMAGE_RESOURCE_DIRECTORY_ENTRY_SIZE > len(rsrc_data):
-                    break
-                    
-                entry_data = rsrc_data[entry_offset:entry_offset + IMAGE_RESOURCE_DIRECTORY_ENTRY_SIZE]
-                resource_id = struct.unpack('<I', entry_data[:4])[0]
-                entry_rva = struct.unpack('<I', entry_data[4:8])[0]
-                
-                # Check if this is RCDATA
-                if resource_id == RT_RCDATA:
-                    # Parse second level directory
-                    if entry_rva & 0x80000000:  # High bit set means it's a directory
-                        dir_offset = entry_rva & 0x7FFFFFFF
-                        sub_resources = self._parse_sub_directory(rsrc_data, dir_offset, rsrc_base_offset)
-                        resources.extend(sub_resources)
-                
-                entry_offset += IMAGE_RESOURCE_DIRECTORY_ENTRY_SIZE
-                
-        except Exception as e:
-            logging.error(f"Error parsing resource directory: {e}")
-            
-        return resources
-    
-    def _parse_sub_directory(self, rsrc_data: bytes, dir_offset: int, rsrc_base_offset: int) -> List[Tuple[int, int]]:
-        """Parse subdirectory for actual resource data."""
-        resources = []
-        
-        try:
-            if dir_offset + IMAGE_RESOURCE_DIRECTORY_SIZE > len(rsrc_data):
-                return resources
-                
-            dir_data = rsrc_data[dir_offset:dir_offset + IMAGE_RESOURCE_DIRECTORY_SIZE]
-            num_name_entries = struct.unpack('<H', dir_data[12:14])[0]
-            num_id_entries = struct.unpack('<H', dir_data[14:16])[0]
-            
-            entry_offset = dir_offset + IMAGE_RESOURCE_DIRECTORY_SIZE
-            
-            for i in range(num_name_entries + num_id_entries):
-                if entry_offset + IMAGE_RESOURCE_DIRECTORY_ENTRY_SIZE > len(rsrc_data):
-                    break
-                    
-                entry_data = rsrc_data[entry_offset:entry_offset + IMAGE_RESOURCE_DIRECTORY_ENTRY_SIZE]
-                entry_rva = struct.unpack('<I', entry_data[4:8])[0]
-                
-                if entry_rva & 0x80000000:  # Another directory level
-                    lang_dir_offset = entry_rva & 0x7FFFFFFF
-                    lang_resources = self._parse_language_directory(rsrc_data, lang_dir_offset, rsrc_base_offset)
-                    resources.extend(lang_resources)
-                else:
-                    # Direct data entry
-                    data_entry_offset = entry_rva
-                    if data_entry_offset + 16 <= len(rsrc_data):
-                        data_entry = rsrc_data[data_entry_offset:data_entry_offset + 16]
-                        data_rva = struct.unpack('<I', data_entry[:4])[0]
-                        data_size = struct.unpack('<I', data_entry[4:8])[0]
-                        resources.append((data_rva, data_size))
-                
-                entry_offset += IMAGE_RESOURCE_DIRECTORY_ENTRY_SIZE
-                
-        except Exception as e:
-            logging.error(f"Error parsing subdirectory: {e}")
-            
-        return resources
-    
-    def _parse_language_directory(self, rsrc_data: bytes, dir_offset: int, rsrc_base_offset: int) -> List[Tuple[int, int]]:
-        """Parse language directory for resource data entries."""
-        resources = []
-        
-        try:
-            if dir_offset + IMAGE_RESOURCE_DIRECTORY_SIZE > len(rsrc_data):
-                return resources
-                
-            dir_data = rsrc_data[dir_offset:dir_offset + IMAGE_RESOURCE_DIRECTORY_SIZE]
-            num_name_entries = struct.unpack('<H', dir_data[12:14])[0]
-            num_id_entries = struct.unpack('<H', dir_data[14:16])[0]
-            
-            entry_offset = dir_offset + IMAGE_RESOURCE_DIRECTORY_SIZE
-            
-            for i in range(num_name_entries + num_id_entries):
-                if entry_offset + IMAGE_RESOURCE_DIRECTORY_ENTRY_SIZE > len(rsrc_data):
-                    break
-                    
-                entry_data = rsrc_data[entry_offset:entry_offset + IMAGE_RESOURCE_DIRECTORY_ENTRY_SIZE]
-                entry_rva = struct.unpack('<I', entry_data[4:8])[0]
-                
-                # This should be a data entry
-                data_entry_offset = entry_rva
-                if data_entry_offset + 16 <= len(rsrc_data):
-                    data_entry = rsrc_data[data_entry_offset:data_entry_offset + 16]
-                    data_rva = struct.unpack('<I', data_entry[:4])[0]
-                    data_size = struct.unpack('<I', data_entry[4:8])[0]
-                    resources.append((data_rva, data_size))
-                
-                entry_offset += IMAGE_RESOURCE_DIRECTORY_ENTRY_SIZE
-                
-        except Exception as e:
-            logging.error(f"Error parsing language directory: {e}")
-            
-        return resources
-    
-    def _rva_to_file_offset(self, rva: int) -> Optional[int]:
-        """Convert RVA (Relative Virtual Address) to file offset."""
-        for section in self.sections:
-            va_start = section['virtual_address']
-            va_end = va_start + section['virtual_size']
-            
-            if va_start <= rva < va_end:
-                offset_in_section = rva - va_start
-                return section['raw_offset'] + offset_in_section
-                
-        return None
+        finally:
+            if pe is not None:
+                pe.close()
+
+    @property
+    def requires_runtime(self) -> bool:
+        return any(entry.reason == "virtual_only" for entry in self.entries)
+
+    def extract_rcdata_resources(self) -> list[bytes]:
+        return [entry.data for entry in self.entries if entry.data is not None]
+
+    def candidates(self, max_script_bytes=16 * 1024 * 1024):
+        for entry in self.entries:
+            if entry.data is not None:
+                yield from detect_scripts(
+                    entry.data,
+                    source="resource",
+                    bounded=True,
+                    base_offset=entry.rva,
+                    resource_name=entry.name,
+                    codepage=entry.codepage,
+                    max_script_bytes=max_script_bytes,
+                    details=entry.metadata(),
+                )
 
 
 def extract_scripts_from_resources(filepath: str, output_dir: str) -> int:
-    """
-    Extract AHK scripts from RCDATA resources in an executable.
-    
-    Args:
-        filepath (str): Path to the executable file
-        output_dir (str): Output directory for extracted scripts
-        
-    Returns:
-        int: Number of scripts extracted
-    """
-    os.makedirs(output_dir, exist_ok=True)
-    
+    """Compatibility wrapper. Each call receives a unique output directory."""
     extractor = PEResourceExtractor(filepath)
     if not extractor.load_file():
-        logging.error("Failed to load PE file")
         return 0
-    
-    resources = extractor.extract_rcdata_resources()
-    scripts_found = 0
-    
-    for i, resource_data in enumerate(resources):
-        try:
-            # Try to detect AHK scripts in the resource data
-            script_content = _extract_ahk_from_resource(resource_data)
-            
-            if script_content:
-                scripts_found += 1
-                filename = f"{output_dir}/script_resource_{i+1}.ahk"
-                
-                with open(filename, 'w', encoding='utf-8') as f:
-                    f.write(script_content)
-                    
-                logging.info(f"Extracted script from resource {i+1}: {len(script_content)} characters")
-                
-        except Exception as e:
-            logging.error(f"Error processing resource {i+1}: {e}")
-    
-    return scripts_found
+    candidates = list(extractor.candidates())
+    if not candidates:
+        return 0
+    from .models import ExtractionResult, Status
+
+    store = OutputStore(Path(output_dir), Path(filepath))
+    for candidate in candidates:
+        store.save(candidate)
+    status = Status.SUCCESS if all(c.complete for c in candidates) else Status.PARTIAL
+    store.finish(ExtractionResult(status=status))
+    return len(store.artifacts)
 
 
-def _extract_ahk_from_resource(resource_data: bytes) -> Optional[str]:
-    """
-    Extract AHK script content from resource data.
-    
-    Args:
-        resource_data (bytes): Raw resource data
-        
-    Returns:
-        Optional[str]: AHK script content if found, None otherwise
-    """
-    try:
-        # Method 1: Look for null-terminated string
-        null_pos = resource_data.find(b'\x00\x00')
-        if null_pos > 0:
-            text_data = resource_data[:null_pos]
-        else:
-            text_data = resource_data
-            
-        # Try different encodings
-        for encoding in ['utf-8', 'utf-16-le', 'latin-1', 'cp1252']:
-            try:
-                decoded_text = text_data.decode(encoding, errors='ignore')
-                
-                # Clean up the text
-                decoded_text = decoded_text.replace('\x00', '').strip()
-                
-                if _is_likely_ahk_script(decoded_text):
-                    return _clean_ahk_script(decoded_text)
-                    
-            except UnicodeDecodeError:
-                continue
-                
-        # Method 2: Look for compressed/encoded data
-        if len(resource_data) > 100:
-            # Check for patterns that might indicate compressed AHK scripts
-            patterns = [
-                b'AutoHotkey',
-                b'SendInput',
-                b'WinActivate', 
-                b'#NoEnv',
-                b'#SingleInstance',
-                b'::',
-                b'Sleep,',
-                b'Run,'
-            ]
-            
-            pattern_count = sum(1 for pattern in patterns if pattern.lower() in resource_data.lower())
-            
-            if pattern_count >= 2:
-                # Try to extract readable text
-                readable_text = ""
-                for byte in resource_data:
-                    if 32 <= byte <= 126:  # Printable ASCII
-                        readable_text += chr(byte)
-                    elif byte in [9, 10, 13]:  # Tab, LF, CR
-                        readable_text += chr(byte)
-                    else:
-                        readable_text += " "
-                
-                # Clean up and check again
-                cleaned_text = re.sub(r'\s+', ' ', readable_text).strip()
-                if len(cleaned_text) > 50 and _is_likely_ahk_script(cleaned_text):
-                    return _clean_ahk_script(cleaned_text)
-                    
-    except Exception as e:
-        logging.error(f"Error extracting AHK from resource: {e}")
-        
-    return None
+def _extract_ahk_from_resource(resource_data: bytes) -> str | None:
+    candidates = detect_scripts(resource_data, bounded=True, source="resource")
+    return candidates[0].text if candidates else None
 
 
 def _is_likely_ahk_script(text: str) -> bool:
-    """
-    Determine if text is likely an AutoHotkey script.
-    
-    Args:
-        text (str): Text to analyze
-        
-    Returns:
-        bool: True if likely AHK script, False otherwise
-    """
-    if len(text) < 20:
-        return False
-        
-    # Look for AHK-specific patterns
-    ahk_indicators = [
-        r'#NoEnv',
-        r'#SingleInstance',
-        r'#Include',
-        r'SendInput\s*[,\(]',
-        r'WinActivate\s*[,\(]',
-        r'Sleep\s*[,\(]',
-        r'ControlClick\s*[,\(]',
-        r'WinWait\s*[,\(]',
-        r'IfWinExist\s*[,\(]',
-        r'Loop\s*[,\(]',
-        r'Hotkey\s*[,\(]',
-        r'::[^:]+::',  # Hotkey syntax
-        r'^\s*[a-zA-Z_][a-zA-Z0-9_]*\s*:=',  # Variable assignment
-        r'Run\s*[,\(]',
-        r'MouseClick\s*[,\(]',
-        r'SetKeyDelay\s*[,\(]'
-    ]
-    
-    matches = 0
-    for pattern in ahk_indicators:
-        if re.search(pattern, text, re.IGNORECASE | re.MULTILINE):
-            matches += 1
-            
-    # Need at least 2 AHK patterns to consider it a script
-    return matches >= 2
+    return is_likely_script(text)
 
 
 def _clean_ahk_script(script: str) -> str:
-    """
-    Clean up extracted AHK script.
-    
-    Args:
-        script (str): Raw script content
-        
-    Returns:
-        str: Cleaned script
-    """
-    # Split into lines and clean each line
-    lines = script.split('\n')
-    cleaned_lines = []
-    
-    for line in lines:
-        # Remove null characters and excessive whitespace
-        line = line.replace('\x00', '').strip()
-        
-        # Skip empty lines at the beginning
-        if not cleaned_lines and not line:
-            continue
-            
-        cleaned_lines.append(line)
-    
-    # Join lines and remove excessive blank lines
-    cleaned_script = '\n'.join(cleaned_lines)
-    cleaned_script = re.sub(r'\n\s*\n\s*\n', '\n\n', cleaned_script)  # Max 2 consecutive newlines
-    
-    return cleaned_script.strip() 
+    # Whitespace may be semantically significant in continuation sections.
+    return script.removeprefix("\ufeff")
+
+
+def runtime_entries(read, module_base: int) -> list[ResourceEntry]:
+    """Walk the mapped resource directory using RVAs, never disk offsets."""
+    header = read(module_base, 4096)
+    if len(header) < 64 or header[:2] != b"MZ":
+        return []
+    pe_offset = struct.unpack_from("<I", header, 60)[0]
+    if pe_offset > 64 * 1024:
+        return []
+    if pe_offset + 264 > len(header):
+        header = read(module_base, pe_offset + 264)
+    if pe_offset + 264 > len(header) or header[pe_offset : pe_offset + 4] != b"PE\0\0":
+        return []
+    optional = pe_offset + 24
+    magic = struct.unpack_from("<H", header, optional)[0]
+    if magic not in (0x10B, 0x20B):
+        return []
+    directories = optional + (112 if magic == 0x20B else 96)
+    rva, size = struct.unpack_from("<II", header, directories + 16)
+    if not rva or not 16 <= size <= 4 * 1024 * 1024:
+        return []
+    blob = read(module_base + rva, size)
+    entries: list[ResourceEntry] = []
+    visited = set()
+
+    def walk(offset=0, path=()):
+        if offset in visited or len(path) > 3 or offset + 16 > len(blob):
+            return
+        visited.add(offset)
+        names, ids = struct.unpack_from("<HH", blob, offset + 12)
+        for index in range(min(names + ids, 4096)):
+            pos = offset + 16 + index * 8
+            if pos + 8 > len(blob) or len(entries) >= 4096:
+                return
+            identifier, pointer = struct.unpack_from("<II", blob, pos)
+            name = identifier
+            if identifier & 0x80000000:
+                name_offset = identifier & 0x7FFFFFFF
+                if name_offset + 2 > len(blob):
+                    continue
+                length = struct.unpack_from("<H", blob, name_offset)[0]
+                if name_offset + 2 + length * 2 > len(blob):
+                    continue
+                try:
+                    name = blob[name_offset + 2 : name_offset + 2 + length * 2].decode("utf-16-le")
+                except UnicodeError:
+                    continue
+            chain = (*path, name)
+            if chain[0] != RT_RCDATA:
+                continue
+            if pointer & 0x80000000:
+                walk(pointer & 0x7FFFFFFF, chain)
+            elif len(chain) == 3 and pointer + 16 <= len(blob):
+                data_rva, data_size, codepage, _ = struct.unpack_from("<IIII", blob, pointer)
+                if 0 < data_size <= MAX_RESOURCE_BYTES:
+                    entries.append(
+                        ResourceEntry(
+                            str(chain[1]), int(chain[2]), data_rva, data_size, codepage, reason="runtime"
+                        )
+                    )
+
+    walk()
+    return entries
